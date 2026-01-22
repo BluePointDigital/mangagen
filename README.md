@@ -30,18 +30,20 @@ A powerful, single-page application for generating manga panels using Google's N
 
 ---
 
-## Workflow Guide
+## Current Features
 
 ### 1. Story Planning & Parsing
-Start by pasting your raw story text into the **Story Parser**. The AI analyzes your text and breaks it down into structured manga pages and panels.
+Quickest way is to start by pasting your raw story text into the **Story Parser**. The AI analyzes your text and breaks it down into structured manga pages and panels.
 ![Story Parser](examples/story-parser.png)
 
 ### 2. Storyboard Editing
-Once parsed, visualize your pages in the **Storyboard**. Here you can:
+You may also use the creator studio to edit a single manga page's layout, visualize your page in the **Storyboard**. Here you can:
 -   Rearrange panels.
 -   Edit dialogue and descriptions.
 -   Assign specific character references to panels.
 ![Manga Storyboard](examples/manga-storyboard.png)
+
+You also can generate the full page in one shot based on the prompt.
 
 ### 3. Asset Management
 Manage your visual consistency using the **Asset Library**. Upload and organize:
@@ -60,7 +62,7 @@ Generate your final high-resolution pages in the **Creator Studio**.
 
 ## Output Examples
 
-Generate high-quality black and white manga pages ready for lettering.
+There is a layout editor for your final pdf export. Basic but will be improved upon later.
 
 | Page Example 1 | Page Example 2 |
 | :---: | :---: |
