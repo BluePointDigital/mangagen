@@ -2,7 +2,7 @@
 
 A powerful, single-page application for generating manga panels using Google's Nano Banana and Nano Banana Pro.. This tool bridges the gap between text stories and visual manga pages, offering a complete workflow from script parsing to final image generation.
 
-![Manga Generator](examples/example-book-cover.jpg)
+![Manga Storyboard](examples/manga-storyboard.png)
 
 ## Quick Start
 
@@ -64,9 +64,9 @@ Generate your final high-resolution pages in the **Creator Studio**.
 
 There is a layout editor for your final pdf export. Basic but will be improved upon later.
 
-| Page Example 1 | Page Example 2 |
-| :---: | :---: |
-| ![Page 1](examples/example-book-page-1.jpg) | ![Page 2](examples/example-book-page-2.jpg) |
+| Title Example 1 || Page Example 1 | Page Example 2 |
+| :---: | :---: | :---: |
+![Manga Generator](examples/example-book-cover.jpg) | ![Page 1](examples/example-book-page-1.jpg) | ![Page 2](examples/example-book-page-2.jpg) |
 
 ---
 
