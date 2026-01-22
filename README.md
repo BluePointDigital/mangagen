@@ -64,9 +64,9 @@ Generate your final high-resolution pages in the **Creator Studio**.
 
 There is a layout editor for your final pdf export. Basic but will be improved upon later.
 
-| Title Example 1 || Page Example 1 | Page Example 2 |
+| Title Example 1 | Page Example 1 | Page Example 2 |
 | :---: | :---: | :---: |
-![Manga Generator](examples/example-book-cover.jpg) | ![Page 1](examples/example-book-page-1.jpg) | ![Page 2](examples/example-book-page-2.jpg) |
+| ![Manga Generator](examples/example-book-cover.jpg) | ![Page 1](examples/example-book-page-1.jpg) | ![Page 2](examples/example-book-page-2.jpg) |
 
 ---
 
