@@ -1,6 +1,6 @@
 # Manga Generator | Nano Banana Edition
 
-A powerful, single-page application for generating manga panels using Google's Nano Banana (Gemini 1.5 Flash) and Nano Banana Pro (Gemini 1.5 Pro). This tool bridges the gap between text stories and visual manga pages, offering a complete workflow from script parsing to final image generation.
+A powerful, single-page application for generating manga panels using Google's Nano Banana and Nano Banana Pro.. This tool bridges the gap between text stories and visual manga pages, offering a complete workflow from script parsing to final image generation.
 
 ![Manga Generator](examples/example-book-cover.jpg)
 
