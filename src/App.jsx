@@ -20,6 +20,7 @@ const App = () => {
     });
     const [isPreviewOpen, setIsPreviewOpen] = useState(false);
     const [isAssemblerOpen, setIsAssemblerOpen] = useState(false);
+    const [isModeChangeDialogOpen, setIsModeChangeDialogOpen] = useState(false);
 
     const GEMINI_PRICING = {
         'flash': { // Nano Banana (Gemini 2.5 Flash Image)
@@ -66,6 +67,7 @@ const App = () => {
 
     const handleProjectSelect = (project) => {
         setCurrentProject(project);
+        setAppMode(project.mode || 'manga'); // Sync mode from project
         localStorage.setItem('manga_maker_last_project', project.id);
     };
 
@@ -97,6 +99,7 @@ const App = () => {
                 if (res.ok) {
                     const project = await res.json();
                     setCurrentProject(project);
+                    setAppMode(project.mode || 'manga'); // Sync mode from project
                 }
             } catch (err) {
                 console.error('Failed to load last project:', err);
@@ -108,6 +111,64 @@ const App = () => {
     const handleSendToCreator = (pageData) => {
         setSharedPageData(pageData);
         setActiveTab('creator');
+    };
+
+    // Generic handler for updating plannedPages (used by assembler and others)
+    const handleUpdatePlannedPages = async (updatedPages) => {
+        if (!currentProject?.id) return;
+
+        const updatedProject = {
+            ...currentProject,
+            plannedPages: updatedPages
+        };
+
+        setCurrentProject(updatedProject);
+
+        // Persist to server
+        try {
+            await fetch(`/api/projects/${currentProject.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plannedPages: updatedPages })
+            });
+        } catch (err) {
+            console.error('Failed to save updated plannedPages:', err);
+        }
+    };
+
+    // Handler for updating a page's image (used by StorybookAssembler upload)
+    const handleUpdatePageImage = async (pageIndex, imageResult) => {
+        if (!currentProject?.plannedPages) return;
+
+        const updatedPages = [...currentProject.plannedPages];
+        updatedPages[pageIndex] = {
+            ...updatedPages[pageIndex],
+            generatedResult: imageResult
+        };
+        await handleUpdatePlannedPages(updatedPages);
+    };
+
+    // Handler for changing project mode with confirmation
+    const handleModeChange = async () => {
+        const newMode = appMode === 'manga' ? 'storybook' : 'manga';
+        
+        try {
+            const res = await fetch(`/api/projects/${currentProject.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: newMode })
+            });
+            
+            if (res.ok) {
+                const updatedProject = await res.json();
+                setCurrentProject(updatedProject);
+                setAppMode(newMode);
+            }
+        } catch (err) {
+            console.error('Failed to change project mode:', err);
+        }
+        
+        setIsModeChangeDialogOpen(false);
     };
 
     useEffect(() => {
@@ -127,24 +188,22 @@ const App = () => {
     }
 
     return (
-        <div className="app-container">
+        <div className="app-container" data-mode={appMode}>
             <header className="main-header">
                 <div className="logo-section">
                     <div className="logo" onClick={() => setCurrentProject(null)} style={{ cursor: 'pointer' }}>MANGAGEN</div>
                     <span className="project-badge">{currentProject.name}</span>
                 </div>
-                <div className="mode-toggle">
-                    <button
-                        className={`mode-btn ${appMode === 'manga' ? 'active' : ''}`}
-                        onClick={() => setAppMode('manga')}
+                <div className="project-mode-indicator" data-mode={appMode}>
+                    <span className="mode-badge">
+                        {appMode === 'storybook' ? '🎨 Storybook' : '📖 Manga'}
+                    </span>
+                    <button 
+                        className="change-mode-btn" 
+                        onClick={() => setIsModeChangeDialogOpen(true)}
+                        title="Change project mode"
                     >
-                        📖 Manga
-                    </button>
-                    <button
-                        className={`mode-btn ${appMode === 'storybook' ? 'active' : ''}`}
-                        onClick={() => setAppMode('storybook')}
-                    >
-                        🎨 Storybook
+                        Change
                     </button>
                 </div>
                 <nav className="nav-tabs">
@@ -206,6 +265,7 @@ const App = () => {
                         projectId={currentProject.id}
                         onUsageUpdate={handleUsageUpdate}
                         appMode={appMode}
+                        onSyncToPlanner={handleUpdatePageImage}
                     />
                 )}
                 {activeTab === 'library' && (
@@ -243,7 +303,39 @@ const App = () => {
                 onClose={() => setIsAssemblerOpen(false)}
                 project={currentProject}
                 appMode={appMode}
+                onUpdatePageImage={handleUpdatePageImage}
+                onUpdatePlannedPages={handleUpdatePlannedPages}
             />
+
+            {/* Mode Change Confirmation Dialog */}
+            {isModeChangeDialogOpen && (
+                <div className="mode-change-overlay">
+                    <div className="mode-change-dialog">
+                        <h3>Change Project Mode?</h3>
+                        <p>
+                            Switching from <strong>{appMode === 'manga' ? 'Manga' : 'Storybook'}</strong> to{' '}
+                            <strong>{appMode === 'manga' ? 'Storybook' : 'Manga'}</strong> mode.
+                        </p>
+                        <p className="mode-change-warning">
+                            Some settings may not transfer between modes. Panel counts and text density settings may be reset for existing pages.
+                        </p>
+                        <div className="mode-change-actions">
+                            <button 
+                                className="btn-cancel" 
+                                onClick={() => setIsModeChangeDialogOpen(false)}
+                            >
+                                Cancel
+                            </button>
+                            <button 
+                                className="btn-confirm-change" 
+                                onClick={handleModeChange}
+                            >
+                                Change Mode
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

@@ -14,11 +14,22 @@
   "description": "",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@tiptap/extension-color": "^3.17.1",
+    "@tiptap/extension-font-family": "^3.17.1",
+    "@tiptap/extension-highlight": "^3.17.1",
+    "@tiptap/extension-text-align": "^3.17.1",
+    "@tiptap/extension-text-style": "^3.17.1",
+    "@tiptap/extension-underline": "^3.17.1",
+    "@tiptap/react": "^3.17.1",
+    "@tiptap/starter-kit": "^3.17.1",
+    "clipper-lib": "^6.4.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "html2canvas": "^1.4.1",
-    "jspdf": "^4.0.0"
+    "jspdf": "^4.0.0",
+    "konva": "^10.2.0",
+    "react-konva": "^19.2.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.7.0",

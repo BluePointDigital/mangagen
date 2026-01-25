@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 const ProjectSelector = ({ onSelect }) => {
     const [projects, setProjects] = useState([]);
     const [newProjectName, setNewProjectName] = useState('');
+    const [newProjectMode, setNewProjectMode] = useState('manga');
     const [loading, setLoading] = useState(true);
 
     const fetchProjects = async () => {
@@ -25,11 +26,12 @@ const ProjectSelector = ({ onSelect }) => {
             const res = await fetch('/api/projects', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: newProjectName.trim() })
+                body: JSON.stringify({ name: newProjectName.trim(), mode: newProjectMode })
             });
             const newProject = await res.json();
             setProjects([...projects, newProject]);
             setNewProjectName('');
+            setNewProjectMode('manga');
             onSelect(newProject);
         } catch (err) {
             console.error('Failed to create project:', err);
@@ -56,6 +58,29 @@ const ProjectSelector = ({ onSelect }) => {
                             value={newProjectName}
                             onChange={(e) => setNewProjectName(e.target.value)}
                         />
+                        <div className="mode-selection">
+                            <label>Project Type:</label>
+                            <div className="mode-options">
+                                <button
+                                    type="button"
+                                    className={`mode-option-btn ${newProjectMode === 'manga' ? 'selected' : ''}`}
+                                    onClick={() => setNewProjectMode('manga')}
+                                >
+                                    <span className="mode-icon">📖</span>
+                                    <span className="mode-label">Manga</span>
+                                    <span className="mode-desc">Panels, dialogue, SFX</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`mode-option-btn ${newProjectMode === 'storybook' ? 'selected' : ''}`}
+                                    onClick={() => setNewProjectMode('storybook')}
+                                >
+                                    <span className="mode-icon">🎨</span>
+                                    <span className="mode-label">Storybook</span>
+                                    <span className="mode-desc">Illustrations, art styles</span>
+                                </button>
+                            </div>
+                        </div>
                         <button type="submit" className="btn-primary">Create New Project</button>
                     </form>
                 </div>
@@ -69,12 +94,15 @@ const ProjectSelector = ({ onSelect }) => {
                             {projects.map((p) => (
                                 <button
                                     key={p.id}
-                                    className="project-card"
+                                    className={`project-card ${p.mode === 'storybook' ? 'storybook-project' : 'manga-project'}`}
                                     onClick={() => onSelect(p)}
                                 >
-                                    <div className="project-icon">📂</div>
+                                    <div className="project-icon">{p.mode === 'storybook' ? '🎨' : '📖'}</div>
                                     <div className="project-info">
                                         <span className="project-name">{p.name}</span>
+                                        <span className="project-mode-tag">
+                                            {p.mode === 'storybook' ? 'Storybook' : 'Manga'}
+                                        </span>
                                         {p.createdAt && (
                                             <span className="project-date">
                                                 {new Date(p.createdAt).toLocaleDateString()}

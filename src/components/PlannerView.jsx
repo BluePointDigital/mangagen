@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import ImageEditorModal from './ImageEditorModal';
 
-const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onUsageUpdate, appMode }) => {
+const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onUsageUpdate, appMode, onProjectUpdate }) => {
+    // Upload refs for each page
+    const pageUploadRefs = useRef({});
     const [fullStory, setFullStory] = useState(initialMetadata?.story || '');
     const [isPlanning, setIsPlanning] = useState(false);
     const [plannedPages, setPlannedPages] = useState(initialMetadata?.plannedPages || []);
@@ -25,11 +28,28 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
     const [generatedResults, setGeneratedResults] = useState({});
     const [batchProgress, setBatchProgress] = useState(null);
     const [expandedPages, setExpandedPages] = useState({});
+    
+    // Image editor state
+    const [editingPageIndex, setEditingPageIndex] = useState(null);
+    const [editingImageData, setEditingImageData] = useState(null);
 
     useEffect(() => {
         if (initialMetadata && !isLocalUpdate) {
             setFullStory(initialMetadata.story || '');
             setPlannedPages(initialMetadata.plannedPages || []);
+            
+            // Restore generatedResults from persisted plannedPages data
+            if (initialMetadata.plannedPages?.length > 0) {
+                const restoredResults = {};
+                initialMetadata.plannedPages.forEach((page, idx) => {
+                    if (page.generatedResult) {
+                        restoredResults[idx] = { success: true, result: page.generatedResult };
+                    }
+                });
+                if (Object.keys(restoredResults).length > 0) {
+                    setGeneratedResults(restoredResults);
+                }
+            }
         }
         if (isLocalUpdate) setIsLocalUpdate(false);
     }, [initialMetadata]);
@@ -231,10 +251,108 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
 
     const handleSendToCreatorWithResult = (page, pageIndex) => {
         const result = generatedResults[pageIndex];
+        const resultData = result?.result || page.generatedResult;
+        // Parse if it's a string (handles markdown-wrapped JSON)
+        const parsedResult = parseResultData(resultData);
         onSendToCreator({
             ...page,
-            generatedResult: result?.result
+            pageIndex,  // Include the page index so Creator can sync back
+            generatedResult: parsedResult || resultData
         });
+    };
+
+    // Open image editor for a page
+    const handleEditPage = (pageIndex) => {
+        const result = generatedResults[pageIndex];
+        const parsedResult = parseResultData(result?.result);
+        if (result?.success && parsedResult?.type === 'image') {
+            const imageDataUrl = `data:${parsedResult.mimeType};base64,${parsedResult.data}`;
+            setEditingImageData(imageDataUrl);
+            setEditingPageIndex(pageIndex);
+        }
+    };
+
+    // Handle save from image editor
+    const handleSaveEdit = (editedResult) => {
+        if (editingPageIndex === null) return;
+        
+        // Update generatedResults
+        setGeneratedResults(prev => ({
+            ...prev,
+            [editingPageIndex]: { success: true, result: editedResult }
+        }));
+
+        // Sync with plannedPages for persistence
+        setPlannedPages(prevPages => {
+            const newPages = [...prevPages];
+            newPages[editingPageIndex] = { ...newPages[editingPageIndex], generatedResult: editedResult };
+            saveProjectState(fullStory, newPages);
+            return newPages;
+        });
+
+        // Close editor
+        setEditingPageIndex(null);
+        setEditingImageData(null);
+    };
+
+    // Close image editor without saving
+    const handleCloseEditor = () => {
+        setEditingPageIndex(null);
+        setEditingImageData(null);
+    };
+
+    // Upload handler for replacing generated images with uploaded ones
+    const handlePageImageUpload = (pageIndex, e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const dataUrl = event.target.result;
+            const base64Data = dataUrl.split(',')[1];
+            const mimeType = file.type || 'image/png';
+
+            const uploadedResult = {
+                type: 'image',
+                data: base64Data,
+                mimeType: mimeType
+            };
+
+            // Update generatedResults
+            setGeneratedResults(prev => ({
+                ...prev,
+                [pageIndex]: { success: true, result: uploadedResult }
+            }));
+
+            // Sync with plannedPages for persistence
+            setPlannedPages(prevPages => {
+                const newPages = [...prevPages];
+                newPages[pageIndex] = { ...newPages[pageIndex], generatedResult: uploadedResult };
+                saveProjectState(fullStory, newPages);
+                return newPages;
+            });
+        };
+        reader.readAsDataURL(file);
+        e.target.value = ''; // Reset input
+    };
+
+    // Helper to parse result data, handling markdown-wrapped JSON strings
+    const parseResultData = (resultData) => {
+        if (!resultData) return null;
+        if (typeof resultData === 'object') return resultData;
+        if (typeof resultData === 'string') {
+            try {
+                let textToParse = resultData.trim();
+                if (textToParse.startsWith('```')) {
+                    textToParse = textToParse.replace(/^```(?:json)?\s*\n?/, '');
+                    textToParse = textToParse.replace(/\n?```\s*$/, '');
+                }
+                return JSON.parse(textToParse);
+            } catch (e) {
+                return null;
+            }
+        }
+        return null;
     };
 
     const renderGeneratedPreview = (pageIndex) => {
@@ -249,11 +367,14 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
             );
         }
 
-        if (result.result?.type === 'image') {
+        // Parse the result data (handles string results with markdown wrapping)
+        const parsedResult = parseResultData(result.result);
+
+        if (parsedResult?.type === 'image') {
             return (
                 <div className="generated-preview">
                     <img
-                        src={`data:${result.result.mimeType};base64,${result.result.data}`}
+                        src={`data:${parsedResult.mimeType};base64,${parsedResult.data}`}
                         alt="Generated page"
                     />
                     <div className="preview-badge">✓ Generated</div>
@@ -261,18 +382,18 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
             );
         }
 
-        if (result.result?.panels) {
+        if (parsedResult?.panels) {
             return (
                 <div className="storyboard-preview">
                     <div className="preview-badge storyboard">📋 Storyboard Ready</div>
                     <div className="mini-panels">
-                        {result.result.panels.slice(0, 4).map((panel, i) => (
+                        {parsedResult.panels.slice(0, 4).map((panel, i) => (
                             <div key={i} className="mini-panel">
                                 <span className="mini-panel-num">{panel.panelNumber}</span>
                             </div>
                         ))}
-                        {result.result.panels.length > 4 && (
-                            <div className="mini-panel more">+{result.result.panels.length - 4}</div>
+                        {parsedResult.panels.length > 4 && (
+                            <div className="mini-panel more">+{parsedResult.panels.length - 4}</div>
                         )}
                     </div>
                 </div>
@@ -339,154 +460,181 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
 
                 {plannedPages.length > 0 && (
                     <>
-                        <div className="settings-divider">
-                            <span>Default Settings</span>
+                        {/* Generation Settings Section */}
+                        <div className="sidebar-settings-section">
+                            <div className="settings-section-header">
+                                <span className="settings-section-icon">⚙️</span>
+                                <span className="settings-section-title">Generation Settings</span>
+                            </div>
+                            
+                            <div className="settings-card">
+                                <div className="settings-card-header">Engine & Output</div>
+                                <div className="settings-grid">
+                                    {appMode !== 'storybook' && (
+                                        <div className="field-group compact">
+                                            <label className="field-label">Mode</label>
+                                            <select
+                                                className="input-glass"
+                                                value={defaultSettings.genMode}
+                                                onChange={(e) => setDefaultSettings(prev => ({ ...prev, genMode: e.target.value }))}
+                                            >
+                                                <option value="storyboard">Storyboard</option>
+                                                <option value="full">Full Page Art</option>
+                                            </select>
+                                        </div>
+                                    )}
+
+                                    <div className="field-group compact">
+                                        <label className="field-label">Engine</label>
+                                        <select
+                                            className="input-glass"
+                                            value={defaultSettings.engine}
+                                            onChange={(e) => setDefaultSettings(prev => ({ ...prev, engine: e.target.value }))}
+                                        >
+                                            <option value="flash">Nano Banana</option>
+                                            <option value="pro">Nano Banana Pro</option>
+                                        </select>
+                                    </div>
+
+                                    <div className="field-group compact">
+                                        <label className="field-label">Color</label>
+                                        <select
+                                            className="input-glass"
+                                            value={defaultSettings.colorMode}
+                                            onChange={(e) => setDefaultSettings(prev => ({ ...prev, colorMode: e.target.value }))}
+                                        >
+                                            <option value="bw">Black & White</option>
+                                            <option value="color">Full Color</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="settings-card">
+                                <div className="settings-card-header">Layout & Size</div>
+                                <div className="settings-grid">
+                                    <div className="field-group compact" style={{ gridColumn: '1 / -1' }}>
+                                        <label className="field-label">Aspect Ratio</label>
+                                        <select
+                                            className="input-glass"
+                                            value={['portrait', 'landscape', 'square', 'cinematic', '3:4'].includes(defaultSettings.aspectRatio) ? defaultSettings.aspectRatio : 'custom'}
+                                            onChange={(e) => {
+                                                const val = e.target.value;
+                                                if (val === 'custom') setDefaultSettings(prev => ({ ...prev, aspectRatio: '' }));
+                                                else setDefaultSettings(prev => ({ ...prev, aspectRatio: val }));
+                                            }}
+                                        >
+                                            <option value="portrait">Standard Manga (2:3)</option>
+                                            <option value="landscape">Landscape (3:2)</option>
+                                            <option value="square">Square (1:1)</option>
+                                            <option value="3:4">Book Portrait (3:4)</option>
+                                            <option value="cinematic">Cinematic (16:9)</option>
+                                            <option value="custom">Custom / Resolution...</option>
+                                        </select>
+                                    </div>
+                                    {!['portrait', 'landscape', 'square', 'cinematic', '3:4'].includes(defaultSettings.aspectRatio) && (
+                                        <div className="field-group compact" style={{ gridColumn: '1 / -1' }}>
+                                            <input
+                                                type="text"
+                                                className="input-glass"
+                                                placeholder="e.g. 1024x1024 or 21:9"
+                                                value={defaultSettings.aspectRatio}
+                                                onChange={(e) => setDefaultSettings(prev => ({ ...prev, aspectRatio: e.target.value }))}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Storybook-specific: Art Style */}
+                            {appMode === 'storybook' && (
+                                <div className="settings-card mode-specific storybook">
+                                    <div className="settings-card-header">
+                                        <span>🎨</span> Art Style
+                                    </div>
+                                    <div className="settings-grid">
+                                        <div className="field-group compact" style={{ gridColumn: '1 / -1' }}>
+                                            <select
+                                                className="input-glass"
+                                                value={defaultSettings.artStyle}
+                                                onChange={(e) => setDefaultSettings(prev => ({ ...prev, artStyle: e.target.value }))}
+                                            >
+                                                <option value="storybook_classic">Classic Storybook</option>
+                                                <option value="watercolor">Watercolor</option>
+                                                <option value="oil_painting">Oil Painting</option>
+                                                <option value="digital_illustration">Digital Illustration</option>
+                                                <option value="anime">Anime</option>
+                                                <option value="realistic">Realistic</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Manga-specific: Text Density */}
+                            {appMode !== 'storybook' && (
+                                <div className="settings-card mode-specific manga">
+                                    <div className="settings-card-header">
+                                        <span>💬</span> Text & Dialogue
+                                    </div>
+                                    <div className="settings-grid">
+                                        <div className="field-group compact" style={{ gridColumn: '1 / -1' }}>
+                                            <label className="field-label">Text Density</label>
+                                            <select
+                                                className="input-glass"
+                                                value={defaultSettings.textDensity}
+                                                onChange={(e) => setDefaultSettings(prev => ({ ...prev, textDensity: e.target.value }))}
+                                            >
+                                                <option value="minimal">Minimal (clean panels)</option>
+                                                <option value="dialog">Dialog Only</option>
+                                                <option value="dialog_fx">Dialog & Sound FX</option>
+                                                <option value="dialog_fx_narration">Dialog, FX & Narration</option>
+                                                <option value="full">Full Detail</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            <button
+                                onClick={applyDefaultsToAll}
+                                className="btn-secondary"
+                            >
+                                Apply to All Pages
+                            </button>
                         </div>
 
-                        <div className="settings-grid">
-                            <div className="field-group compact">
-                                <label className="field-label">Mode</label>
-                                <select
-                                    className="input-glass"
-                                    value={defaultSettings.genMode}
-                                    onChange={(e) => setDefaultSettings(prev => ({ ...prev, genMode: e.target.value }))}
-                                    disabled={appMode === 'storybook'}
-                                >
-                                    <option value="storyboard">{appMode === 'storybook' ? '🎨 Illustration' : 'Storyboard'}</option>
-                                    <option value="full">{appMode === 'storybook' ? '🎨 Illustration' : 'Full Page Art'}</option>
-                                </select>
-                            </div>
+                        {/* Generate Section */}
+                        <div className="sidebar-generate-section">
+                            <button
+                                onClick={handleBatchGenerate}
+                                disabled={batchProgress !== null || plannedPages.length === 0}
+                                className="btn-batch"
+                            >
+                                {batchProgress ? (
+                                    <>
+                                        <span className="btn-loader"></span>
+                                        Generating {batchProgress.current}/{batchProgress.total}...
+                                    </>
+                                ) : (
+                                    <>✨ Generate All Pages</>
+                                )}
+                            </button>
 
-                            <div className="field-group compact">
-                                <label className="field-label">Engine</label>
-                                <select
-                                    className="input-glass"
-                                    value={defaultSettings.engine}
-                                    onChange={(e) => setDefaultSettings(prev => ({ ...prev, engine: e.target.value }))}
-                                >
-                                    <option value="flash">Nano Banana</option>
-                                    <option value="pro">Nano Banana Pro</option>
-                                </select>
-                            </div>
-
-                            <div className="field-group compact">
-                                <label className="field-label">Color</label>
-                                <select
-                                    className="input-glass"
-                                    value={defaultSettings.colorMode}
-                                    onChange={(e) => setDefaultSettings(prev => ({ ...prev, colorMode: e.target.value }))}
-                                >
-                                    <option value="bw">Black & White</option>
-                                    <option value="color">Full Color</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <div className="settings-grid">
-                            <div className="field-group compact">
-                                <label className="field-label">Aspect Ratio</label>
-                                <select
-                                    className="input-glass"
-                                    value={['portrait', 'landscape', 'square', 'cinematic', '3:4'].includes(defaultSettings.aspectRatio) ? defaultSettings.aspectRatio : 'custom'}
-                                    onChange={(e) => {
-                                        const val = e.target.value;
-                                        if (val === 'custom') setDefaultSettings(prev => ({ ...prev, aspectRatio: '' }));
-                                        else setDefaultSettings(prev => ({ ...prev, aspectRatio: val }));
-                                    }}
-                                >
-                                    <option value="portrait">Standard Manga (2:3)</option>
-                                    <option value="landscape">Landscape (3:2)</option>
-                                    <option value="square">Square (1:1)</option>
-                                    <option value="3:4">Book Portrait (3:4)</option>
-                                    <option value="cinematic">Cinematic (16:9)</option>
-                                    <option value="custom">Custom / Resolution...</option>
-                                </select>
-                            </div>
-                            {!['portrait', 'landscape', 'square', 'cinematic', '3:4'].includes(defaultSettings.aspectRatio) && (
-                                <div className="field-group compact" style={{ gridColumn: '1 / -1' }}>
-                                    <input
-                                        type="text"
-                                        className="input-glass"
-                                        placeholder="e.g. 1024x1024 or 21:9"
-                                        value={defaultSettings.aspectRatio}
-                                        onChange={(e) => setDefaultSettings(prev => ({ ...prev, aspectRatio: e.target.value }))}
-                                    />
+                            {(completedCount > 0 || batchProgress) && (
+                                <div className="batch-status">
+                                    <div className="status-bar">
+                                        <div
+                                            className="status-fill"
+                                            style={{ width: `${(completedCount / plannedPages.length) * 100}%` }}
+                                        />
+                                    </div>
+                                    <span className="status-text">
+                                        {completedCount}/{plannedPages.length} pages complete
+                                    </span>
                                 </div>
                             )}
                         </div>
-
-                        {appMode === 'storybook' && (
-                            <div className="settings-grid">
-                                <div className="field-group compact">
-                                    <label className="field-label">Art Style</label>
-                                    <select
-                                        className="input-glass"
-                                        value={defaultSettings.artStyle}
-                                        onChange={(e) => setDefaultSettings(prev => ({ ...prev, artStyle: e.target.value }))}
-                                    >
-                                        <option value="storybook_classic">Classic</option>
-                                        <option value="watercolor">Watercolor</option>
-                                        <option value="oil_painting">Oil Painting</option>
-                                        <option value="digital_illustration">Digital</option>
-                                        <option value="anime">Anime</option>
-                                        <option value="realistic">Realistic</option>
-                                    </select>
-                                </div>
-                            </div>
-                        )}
-
-                        {appMode !== 'storybook' && (
-                            <div className="field-group compact">
-                                <label className="field-label">Text Density</label>
-                                <select
-                                    className="input-glass"
-                                    value={defaultSettings.textDensity}
-                                    onChange={(e) => setDefaultSettings(prev => ({ ...prev, textDensity: e.target.value }))}
-                                >
-                                    <option value="minimal">Minimal</option>
-                                    <option value="dialog">Dialog Only</option>
-                                    <option value="dialog_fx">Dialog & FX</option>
-                                    <option value="dialog_fx_narration">Dialog, FX & Narration</option>
-                                    <option value="full">Full Detail</option>
-                                </select>
-                            </div>
-                        )}
-
-                        <button
-                            onClick={applyDefaultsToAll}
-                            className="btn-secondary"
-                        >
-                            Apply to All Pages
-                        </button>
-
-                        <button
-                            onClick={handleBatchGenerate}
-                            disabled={batchProgress !== null || plannedPages.length === 0}
-                            className="btn-batch"
-                        >
-                            {batchProgress ? (
-                                <>
-                                    <span className="btn-loader"></span>
-                                    Generating {batchProgress.current}/{batchProgress.total}...
-                                </>
-                            ) : (
-                                <>🚀 Generate All Pages</>
-                            )}
-                        </button>
-
-                        {(completedCount > 0 || batchProgress) && (
-                            <div className="batch-status">
-                                <div className="status-bar">
-                                    <div
-                                        className="status-fill"
-                                        style={{ width: `${(completedCount / plannedPages.length) * 100}%` }}
-                                    />
-                                </div>
-                                <span className="status-text">
-                                    {completedCount}/{plannedPages.length} pages complete
-                                </span>
-                            </div>
-                        )}
                     </>
                 )}
             </aside>
@@ -522,13 +670,14 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                 const matchedRefs = getReferencesForPage(page);
                                 const isGenerating = generatingPages[idx];
                                 const hasResult = generatedResults[idx];
+                                const parsedResultData = hasResult?.success ? parseResultData(hasResult.result) : null;
                                 const isExpanded = expandedPages[idx];
                                 const settings = pageSettings[idx] || defaultSettings;
 
                                 return (
                                     <div
                                         key={idx}
-                                        className={`page-card animate-in ${hasResult?.success ? 'completed' : ''} ${isGenerating ? 'generating' : ''}`}
+                                        className={`page-card animate-in ${hasResult?.success ? 'completed' : ''} ${isGenerating ? 'generating' : ''} ${isExpanded ? 'expanded-view' : ''}`}
                                         style={{ animationDelay: `${idx * 0.05}s` }}
                                     >
                                         <div className="page-header" onClick={() => toggleExpanded(idx)}>
@@ -693,6 +842,29 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                     '⚡ Generate'
                                                 )}
                                             </button>
+                                            {hasResult?.success && parsedResultData?.type === 'image' && (
+                                                <button
+                                                    className="action-btn edit"
+                                                    onClick={() => handleEditPage(idx)}
+                                                    title="Edit this image"
+                                                >
+                                                    ✏️ Edit
+                                                </button>
+                                            )}
+                                            <button
+                                                className="action-btn upload"
+                                                onClick={() => pageUploadRefs.current[idx]?.click()}
+                                                title="Upload an image instead of generating"
+                                            >
+                                                📤 Upload
+                                            </button>
+                                            <input
+                                                ref={el => pageUploadRefs.current[idx] = el}
+                                                type="file"
+                                                accept="image/*"
+                                                onChange={(e) => handlePageImageUpload(idx, e)}
+                                                style={{ display: 'none' }}
+                                            />
                                             <button
                                                 className="action-btn send"
                                                 onClick={() => handleSendToCreatorWithResult(page, idx)}
@@ -707,6 +879,16 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                     </div>
                 )}
             </main>
+
+            {/* Image Editor Modal */}
+            <ImageEditorModal
+                isOpen={editingPageIndex !== null}
+                onClose={handleCloseEditor}
+                imageData={editingImageData}
+                onSaveEdit={handleSaveEdit}
+                engine="pro"
+                projectId={projectId}
+            />
         </div >
     );
 };

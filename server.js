@@ -74,7 +74,7 @@ app.get('/api/projects', (req, res) => {
 
 // API: Create Project
 app.post('/api/projects', (req, res) => {
-    const { name } = req.body;
+    const { name, mode } = req.body;
     const id = name.toLowerCase().replace(/[^a-z0-9]/g, '-');
     const projectPath = path.join(PROJECTS_DIR, id);
 
@@ -88,7 +88,14 @@ app.post('/api/projects', (req, res) => {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     });
 
-    const metadata = { id, name, createdAt: new Date().toISOString(), story: '', plannedPages: [] };
+    const metadata = { 
+        id, 
+        name, 
+        mode: mode || 'manga',  // Store project mode (manga or storybook)
+        createdAt: new Date().toISOString(), 
+        story: '', 
+        plannedPages: [] 
+    };
     fs.writeFileSync(path.join(projectPath, 'project.json'), JSON.stringify(metadata, null, 2));
 
     res.json(metadata);
@@ -164,10 +171,10 @@ app.post('/api/generate', async (req, res) => {
 
         // Model Mapping
         const models = {
-            flash: process.env.CREATOR_FLASH_MODEL || 'gemini-1.5-flash',
-            pro: process.env.CREATOR_PRO_MODEL || 'gemini-1.5-pro',
-            flashImage: process.env.CREATOR_IMAGE_MODEL_FLASH || 'gemini-1.5-flash',
-            proImage: process.env.CREATOR_IMAGE_MODEL_PRO || 'gemini-1.5-pro'
+            flash: process.env.CREATOR_FLASH_MODEL || 'gemini-3-flash-preview',
+            pro: process.env.CREATOR_PRO_MODEL || 'gemini-3-pro-preview',
+            flashImage: process.env.CREATOR_IMAGE_MODEL_FLASH || 'gemini-2.5-flash-image',
+            proImage: process.env.CREATOR_IMAGE_MODEL_PRO || 'gemini-3-pro-image-preview'
         };
 
         const isImageGeneration = mode === 'full' || mode === 'storybook' || appMode === 'storybook';
@@ -177,7 +184,9 @@ app.post('/api/generate', async (req, res) => {
 
         const model = genAI.getGenerativeModel({
             model: modelId,
-            generationConfig: isImageGeneration ? {} : { responseMimeType: "application/json" }
+            generationConfig: isImageGeneration 
+                ? { responseModalities: ["TEXT", "IMAGE"] }  // Request image output for image generation modes
+                : { responseMimeType: "application/json" }
         });
 
         let systemPrompt;
@@ -213,6 +222,8 @@ app.post('/api/generate', async (req, res) => {
                - Ensure visual consistency with the character, location, and style references provided.
                - The composition should be clean, evocative, and suitable for a children's storybook.
                - If you are being asked to call a tool, IGNORE that and instead directly output the image contents as your response.`;
+        } else if (isImageGeneration) {
+            // Manga Full Page Art mode (mode === 'full' and appMode !== 'storybook')
             systemPrompt = `Task: Acting as a professional manga artist, generate a SINGLE high-fidelity manga page image based on the story snippet and references provided.
                
                VISUAL STYLE:
@@ -286,25 +297,39 @@ Only return the JSON. Do not include markdown code blocks or additional text.`;
         const usage = response.usageMetadata;
 
         if (isImageGeneration) {
+            console.log(`[Image Generation] Mode: ${mode}, AppMode: ${appMode}, Model: ${modelId}`);
             const candidates = response.candidates;
             if (candidates && candidates.length > 0) {
                 const parts = candidates[0].content.parts;
+                console.log(`[Image Generation] Response parts:`, parts.map(p => p.inlineData ? 'IMAGE' : 'TEXT').join(', '));
                 const imagePart = parts.find(p => p.inlineData);
                 if (imagePart) {
+                    console.log(`[Image Generation] Success - returning image`);
                     return res.json({
                         result: { type: 'image', data: imagePart.inlineData.data, mimeType: imagePart.inlineData.mimeType },
                         usage
                     });
                 }
             }
+            // No image in response - return text but log warning
             const text = response.text();
+            console.warn(`[Image Generation] WARNING: No image returned by model. Text response:`, text.substring(0, 200));
             res.json({ result: text, usage });
         } else {
-            const text = response.text();
+            let text = response.text();
+            // Strip markdown code blocks if present (```json ... ``` or ``` ... ```)
+            text = text.trim();
+            if (text.startsWith('```')) {
+                // Remove opening code fence (with optional language identifier)
+                text = text.replace(/^```(?:json)?\s*\n?/, '');
+                // Remove closing code fence
+                text = text.replace(/\n?```\s*$/, '');
+            }
             try {
                 const parsed = JSON.parse(text);
                 res.json({ result: parsed, usage });
             } catch (e) {
+                console.error('JSON parse error:', e.message, 'Raw text:', text.substring(0, 200));
                 res.json({ result: text, usage });
             }
         }
@@ -316,7 +341,7 @@ Only return the JSON. Do not include markdown code blocks or additional text.`;
 
 // API: Generate Single Panel
 app.post('/api/generate-panel', async (req, res) => {
-    const { panel, references, engine, projectId, colorMode, textDensity } = req.body;
+    const { panel, references, engine, projectId, colorMode, textDensity, aspectRatio } = req.body;
 
     if (!process.env.GOOGLE_API_KEY) {
         return res.status(400).json({ error: 'Google API Key not configured' });
@@ -327,21 +352,34 @@ app.post('/api/generate-panel', async (req, res) => {
 
         // Use Image Models for drawing art
         const models = {
-            flashImage: process.env.CREATOR_IMAGE_MODEL_FLASH || 'gemini-1.5-flash',
-            proImage: process.env.CREATOR_IMAGE_MODEL_PRO || 'gemini-1.5-pro'
+            flashImage: process.env.CREATOR_IMAGE_MODEL_FLASH || 'gemini-2.5-flash-image',
+            proImage: process.env.CREATOR_IMAGE_MODEL_PRO || 'gemini-3-pro-image-preview'
         };
 
         const modelId = engine === 'pro' ? models.proImage : models.flashImage;
 
         const model = genAI.getGenerativeModel({
             model: modelId,
-            generationConfig: {} // Default to image/content generation
+            generationConfig: { responseModalities: ["TEXT", "IMAGE"] } // Request image output
         });
+
+        console.log(`[Panel Generation] Engine: ${engine}, Model: ${modelId}, AspectRatio: ${aspectRatio || 'default'}`);
+
+        // Map aspect ratio values to descriptive text
+        const aspectRatioMap = {
+            'portrait': '2:3 (Portrait/Tall)',
+            'landscape': '3:2 (Landscape/Wide)',
+            'square': '1:1 (Square)',
+            '3:4': '3:4 (Book Portrait)',
+            'cinematic': '16:9 (Cinematic/Widescreen)'
+        };
+        const aspectRatioText = aspectRatioMap[aspectRatio] || aspectRatio || '2:3 (Portrait)';
 
         const systemPrompt = `Task: Acting as a professional manga artist, generate a SINGLE high-fidelity manga panel based on the description and references provided.
                
                VISUAL STYLE:
                - ${colorMode === 'color' ? 'Full color digital illustration.' : 'Traditional black and white manga style with screen tones.'}
+               - Aspect Ratio: Generate the image in a ${aspectRatioText} aspect ratio. This is CRITICAL - the image dimensions must match this ratio.
 
                TEXT & DETAIL DENSITY (${textDensity}):
                ${textDensity === 'minimal' ? '- Minimal dialogue, no SFX, focus on visual flow.' : ''}
@@ -354,6 +392,7 @@ app.post('/api/generate-panel', async (req, res) => {
                - The output MUST be a high-quality image of EXACTLY ONE panel.
                - DO NOT return any text, JSON, or code blocks.
                - Detailed artwork that remains consistent with the character references.
+               - IMPORTANT: The image MUST be generated in ${aspectRatioText} aspect ratio.
                - Layout: ${panel.layout}
                - Composition: ${panel.composition}
                - Dialogue: ${panel.dialogue || 'None'}
@@ -383,8 +422,10 @@ app.post('/api/generate-panel', async (req, res) => {
         const candidates = response.candidates;
         if (candidates && candidates.length > 0) {
             const parts = candidates[0].content.parts;
+            console.log(`[Panel Generation] Response parts:`, parts.map(p => p.inlineData ? 'IMAGE' : 'TEXT').join(', '));
             const imagePart = parts.find(p => p.inlineData);
             if (imagePart) {
+                console.log(`[Panel Generation] Success - returning image`);
                 return res.json({
                     result: { type: 'image', data: imagePart.inlineData.data, mimeType: imagePart.inlineData.mimeType },
                     usage
@@ -393,6 +434,7 @@ app.post('/api/generate-panel', async (req, res) => {
         }
 
         const text = response.text();
+        console.warn(`[Panel Generation] WARNING: No image returned. Text response:`, text.substring(0, 200));
         res.json({ result: text, usage });
     } catch (error) {
         console.error('AI Panel Error:', error);
@@ -410,7 +452,7 @@ app.post('/api/plan', async (req, res) => {
 
     try {
         const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-        const plannerModel = process.env.PLANNER_MODEL || 'gemini-1.5-pro';
+        const plannerModel = process.env.PLANNER_MODEL || 'gemini-3-flash-preview';
         const model = genAI.getGenerativeModel({
             model: plannerModel,
             generationConfig: { responseMimeType: "application/json" }
@@ -478,43 +520,147 @@ app.post('/api/plan', async (req, res) => {
     }
 });
 
-// API: Edit Image (In-painting)
+// API: Edit Image (Visual Highlight Approach)
+// Instead of sending a separate mask, we overlay the mask on the image as a visible
+// magenta highlight so the AI can visually see what area to edit.
+// Also supports "insert" mode for adding character assets to the scene.
 app.post('/api/edit', async (req, res) => {
-    const { imageData, maskData, prompt, engine, projectId } = req.body;
+    const { compositeImageData, originalImageData, assets, prompt, engine, projectId, mode, imageDimensions } = req.body;
 
+    // Validation
+    if (!originalImageData) {
+        return res.status(400).json({ error: 'Original image data is missing' });
+    }
+    // Composite image only required for Edit mode, not Insert mode
+    if (mode !== 'insert' && !compositeImageData) {
+        return res.status(400).json({ error: 'Composite image data is missing' });
+    }
+    // Prompt required for Edit mode, optional for Insert mode
+    if (mode !== 'insert' && !prompt) {
+        return res.status(400).json({ error: 'Edit prompt is required' });
+    }
     if (!process.env.GOOGLE_API_KEY) {
         return res.status(400).json({ error: 'Google API Key not configured' });
     }
 
     try {
         const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-        const models = {
-            flashImage: process.env.CREATOR_IMAGE_MODEL_FLASH || 'gemini-1.5-flash',
-            proImage: process.env.CREATOR_IMAGE_MODEL_PRO || 'gemini-1.5-pro'
-        };
-
-        const modelId = engine === 'pro' ? models.proImage : models.flashImage;
+        
+        // Use same model selection as page generation (env-based)
+        const modelId = engine === 'pro' 
+            ? (process.env.CREATOR_IMAGE_MODEL_PRO || 'gemini-3-pro-image-preview')
+            : (process.env.CREATOR_IMAGE_MODEL_FLASH || 'gemini-2.5-flash-image');
+        
         const model = genAI.getGenerativeModel({ model: modelId });
 
-        const [imageMime, imageBase64] = imageData.split(';base64,');
-        const [maskMime, maskBase64] = maskData.split(';base64,');
+        // Parse the original image
+        if (!originalImageData.includes(';base64,')) {
+            return res.status(400).json({ error: 'Invalid original image format (expected data URL)' });
+        }
+        const [originalMime, originalBase64] = originalImageData.split(';base64,');
 
-        const systemPrompt = `Task: Edit the provided image based on the prompt. 
-        You are also provided with a 'MASK' image (white areas indicate where changes should be made).
-        Modify ONLY the areas indicated by the mask. 
-        Keep the rest of the image exactly the same to maintain visual consistency.
-        Return ONLY the resulting image. No text or JSON.`;
+        // Parse composite image if provided (for Edit Mode)
+        let compositeBase64, compositeMime;
+        if (compositeImageData && compositeImageData.includes(';base64,')) {
+            [compositeMime, compositeBase64] = compositeImageData.split(';base64,');
+        }
 
-        const promptParts = [
-            { text: systemPrompt },
-            { text: `Edit Instruction: ${prompt}` },
-            { text: "Original Image:" },
-            { inlineData: { data: imageBase64, mimeType: imageMime.split(':')[1] } },
-            { text: "Mask (White areas are editable):" },
-            { inlineData: { data: maskBase64, mimeType: maskMime.split(':')[1] } }
-        ];
+        let promptParts;
 
-        const result = await model.generateContent({ contents: [{ role: 'user', parts: promptParts }] });
+        if (mode === 'insert' && assets && assets.length > 0) {
+            // INSERT MODE: Regenerate scene with characters (matches page generation approach)
+            // Parse all asset images
+            const parsedAssets = [];
+            for (const asset of assets) {
+                if (!asset.dataUrl || !asset.dataUrl.includes(';base64,')) {
+                    continue; // Skip invalid assets
+                }
+                const [assetMime, assetBase64] = asset.dataUrl.split(';base64,');
+                parsedAssets.push({
+                    name: asset.name,
+                    base64: assetBase64,
+                    mimeType: assetMime.split(':')[1]
+                });
+            }
+
+            if (parsedAssets.length === 0) {
+                return res.status(400).json({ error: 'No valid character images provided' });
+            }
+
+            const characterNames = parsedAssets.map(a => a.name).join(', ');
+
+            // Build dimension instruction if provided
+            const dimensionInstruction = imageDimensions 
+                ? `\n- Output image MUST match the original dimensions: ${imageDimensions.width}x${imageDimensions.height} pixels`
+                : '';
+
+            // New approach: Regenerate scene with characters (like page generation)
+            const insertPrompt = `Regenerate this scene with the following character(s) added: ${characterNames}.
+
+CRITICAL REQUIREMENTS:
+- Use the ORIGINAL SCENE IMAGE as your primary reference
+- Keep the composition, background, lighting, and style as close to the original as possible
+- Add the character(s) to the scene, matching the art style exactly
+- Use the CHARACTER REFERENCE images to ensure accurate character appearance
+- The result should look like a new version of the same scene, but with the characters present
+- Maintain the same panel layout, text bubbles, and visual elements from the original${dimensionInstruction}
+
+${prompt ? 'Additional instructions: ' + prompt : ''}`;
+
+            // Build prompt parts matching page generation format
+            promptParts = [
+                { text: insertPrompt },
+                { text: `\n\nOriginal scene (replicate this closely, but add the characters):` },
+                { inlineData: { data: originalBase64, mimeType: originalMime.split(':')[1] } }
+            ];
+
+            // Add character references using same format as page generation
+            for (const asset of parsedAssets) {
+                promptParts.push({ text: `\n\nReference image for: ${asset.name}` });
+                promptParts.push({ inlineData: { data: asset.base64, mimeType: asset.mimeType } });
+            }
+        } else {
+            // EDIT MODE: Standard editing with highlight
+            // Composite image is required for Edit mode
+            if (!compositeBase64) {
+                return res.status(400).json({ error: 'Composite image with highlight is required for Edit mode' });
+            }
+            
+            // Build dimension instruction if provided
+            const dimensionInstruction = imageDimensions 
+                ? `\n- Output image MUST match the original dimensions: ${imageDimensions.width}x${imageDimensions.height} pixels`
+                : '';
+            
+            const editPrompt = `You are an expert image editor. I am providing you with two images:
+
+1. REFERENCE IMAGE: Shows the area I want to edit, marked with a MAGENTA/PINK colored highlight overlay. The magenta area indicates EXACTLY where the edit should be applied.
+
+2. ORIGINAL IMAGE: The clean original image without any highlights.
+
+Your task:
+- Look at the REFERENCE IMAGE to see the magenta highlighted area - this is the ONLY area to modify
+- Apply the edit instruction ONLY to that highlighted area
+- Use the ORIGINAL IMAGE as the base, and make the edit only in the corresponding location
+- Keep ALL other areas of the image EXACTLY the same - same colors, same details, same everything
+- The result should look like the original image but with the specified change applied only to the highlighted region${dimensionInstruction}
+
+CRITICAL: Do NOT change anything outside the highlighted area. The edit must be surgically precise to only the magenta region.`;
+
+            promptParts = [
+                { text: editPrompt },
+                { text: `\n\nEdit Instruction: "${prompt}"\n\nREFERENCE IMAGE (magenta area = edit zone):` },
+                { inlineData: { data: compositeBase64, mimeType: compositeMime.split(':')[1] } },
+                { text: "\n\nORIGINAL IMAGE (apply edit to this, keeping non-highlighted areas unchanged):" },
+                { inlineData: { data: originalBase64, mimeType: originalMime.split(':')[1] } }
+            ];
+        }
+
+        const result = await model.generateContent({ 
+            contents: [{ role: 'user', parts: promptParts }],
+            generationConfig: {
+                responseModalities: ["TEXT", "IMAGE"]
+            }
+        });
         const response = await result.response;
         const candidates = response.candidates;
 
