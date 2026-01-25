@@ -4,28 +4,6 @@
 
 A professional-grade, AI-powered workspace for creating manga, comics, and illustrated storybooks. Leveraging Google Gemini's advanced multimodal capabilities, this application transforms raw text into fully realized visual narratives with precise control over layout, style, and composition.
 
-## 🚀 Application Workflow
-
-```mermaid
-graph TD
-    Start["Raw Story Text"] --> Planner["Story Planner"]
-    Planner -->|AI Analysis| Pages["Planned Pages & Scenes"]
-    Pages --> ModeChoice{Project Mode}
-    
-    ModeChoice -->|Manga| Creator["Creator Studio"]
-    ModeChoice -->|Storybook| Assembler["Storybook Assembler"]
-    
-    Creator -->|Layouts| Konva["Konva Panel Positioning"]
-    Konva -->|Art Gen| AI_Gen["Gemini Image Generation"]
-    AI_Gen -->|Refinement| Editor["AI Image Editor"]
-    
-    Assembler -->|Rich Text| TipTap["TipTap Composer"]
-    Assembler -->|Layouts| Overlays["Text Overlays"]
-    
-    Editor --> Final["Final Page Export"]
-    Overlays --> Final
-    Final --> Library["Project Library"]
-```
 
 ---
 
