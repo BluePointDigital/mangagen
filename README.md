@@ -9,7 +9,8 @@ MangaGen is a local-first workspace for planning, generating, editing, assemblin
 This branch updates the older Gemini/Nano Banana release into a more portable, provider-routed local app.
 
 - Added an Express backend app with validated filesystem storage, project metadata persistence, static production serving, and local-only browser origin protection.
-- Added global AI Settings with provider tabs for Google, OpenAI, OpenRouter, and custom OpenAI-compatible endpoints.
+- Added an in-app AI Settings dashboard with provider tabs for Google, OpenAI, OpenRouter, and custom OpenAI-compatible endpoints.
+- Added editable API keys, base URLs, model IDs, provider capabilities, generation defaults, operation routes, and cost estimates inside the app UI.
 - Replaced per-page Basic/Pro, Flash/Pro, and Engine selectors with operation routes configured once in AI Settings.
 - Split AI routing by operation: story planner, storyboard text, page image, panel image, and image edit.
 - Added route-based cost estimates so the usage footer is no longer tied to Google-labeled pricing.
@@ -67,24 +68,13 @@ This repository is currently designed for local use.
 npm install
 ```
 
-2. Create `.env` from `.env-sample`.
+2. Start from `.env-sample` if you want bootstrap defaults.
 
 ```bash
 copy .env-sample .env
 ```
 
-3. Add at least one provider key or configure a custom local endpoint in AI Settings.
-
-```env
-GOOGLE_API_KEY=your_google_key_here
-OPENAI_API_KEY=your_openai_key_here
-OPENROUTER_API_KEY=your_openrouter_key_here
-CUSTOM_AI_BASE_URL=http://localhost:1234/v1
-```
-
-Environment variables are bootstrap and fallback values. Saved AI Settings override them after the settings file exists.
-
-4. Start the backend and frontend together.
+3. Start the backend and frontend together.
 
 ```bash
 npm run launch
@@ -92,6 +82,19 @@ npm run launch
 
 Frontend: [http://localhost:5173](http://localhost:5173)
 Backend: [http://localhost:3001](http://localhost:3001)
+
+4. Open a project, then use Project -> Settings to configure AI providers.
+
+You can enter or replace API keys, base URLs, model IDs, route assignments, defaults, and cost estimates from the in-app AI Settings dashboard. Saved settings are written locally under `settings/ai-config.json` and take precedence over environment values.
+
+Environment variables are optional bootstrap/fallback values for fresh installs, Docker runs, and scripted setups:
+
+```env
+GOOGLE_API_KEY=your_google_key_here
+OPENAI_API_KEY=your_openai_key_here
+OPENROUTER_API_KEY=your_openrouter_key_here
+CUSTOM_AI_BASE_URL=http://localhost:1234/v1
+```
 
 ## Scripts
 
@@ -108,22 +111,23 @@ Build and run MangaGen as a single local-first container:
 
 ```bash
 docker build -t mangagen .
-docker run -p 3001:3001 -v mangagen-data:/data -e GOOGLE_API_KEY=your_api_key_here mangagen
+docker run -p 3001:3001 -v mangagen-data:/data mangagen
 ```
 
 Open [http://localhost:3001](http://localhost:3001).
 
 The container stores projects, library assets, generated pages, generation history, batch queue state, and global AI settings under `/data`.
 
-You can also pass an env file:
+Configure provider keys and routes from Project -> Settings in the app. Docker environment variables are optional bootstrap values for a new `/data` volume:
 
 ```bash
+docker run -p 3001:3001 -v mangagen-data:/data -e GOOGLE_API_KEY=your_api_key_here mangagen
 docker run -p 3001:3001 -v mangagen-data:/data --env-file .env mangagen
 ```
 
 ## AI providers and routes
 
-Open AI Settings from the Project menu to configure credentials, provider capabilities, model IDs, operation routes, generation defaults, and cost estimates.
+Open AI Settings from the Project menu to configure credentials, provider capabilities, model IDs, operation routes, generation defaults, and cost estimates. This dashboard is the primary configuration surface; environment variables only seed or fall back for settings that have not been saved yet.
 
 Supported provider options:
 
