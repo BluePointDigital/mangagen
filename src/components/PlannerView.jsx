@@ -1,125 +1,165 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ImageEditorModal from './ImageEditorModal';
+import StatusMessage from './ui/StatusMessage';
+import { generatePage as requestGeneratePage, getGenerationHistory, planStory as requestPlanStory, saveAsset, updateProject } from '../lib/api.mjs';
+import { fetchAssetsAsReferences, getDisplayImageSrc, inlineImageToSavePayload, toInlineImageDataUrl } from '../lib/assets.mjs';
+import { clearInlineGeneratedResults, getPageGenerationSettings, getPersistedOrTransientResult, mergePageAtIndex, updatePageGeneratedAsset } from '../lib/projectPages.mjs';
+import { parseStoryboardResult } from '../lib/results.mjs';
 
-const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onUsageUpdate, appMode, onProjectUpdate }) => {
-    // Upload refs for each page
+const fallbackDefaults = {
+    genMode: 'full',
+    colorMode: 'bw',
+    textDensity: 'dialog_fx',
+    aspectRatio: 'portrait',
+    artStyle: 'storybook_classic',
+};
+
+const PlannerView = ({ aiDefaults, library, onSendToCreator, projectId, initialMetadata, onUsageUpdate, appMode, onProjectUpdate, onNotify }) => {
     const pageUploadRefs = useRef({});
     const [fullStory, setFullStory] = useState(initialMetadata?.story || '');
     const [isPlanning, setIsPlanning] = useState(false);
     const [plannedPages, setPlannedPages] = useState(initialMetadata?.plannedPages || []);
-    const [targetPageCount, setTargetPageCount] = useState(0); // 0 for Auto
-    const [isLocalUpdate, setIsLocalUpdate] = useState(false); // Guard to prevent useEffect loop
+    const [targetPageCount, setTargetPageCount] = useState(0);
+    const [isLocalUpdate, setIsLocalUpdate] = useState(false);
+    const [statusMessage, setStatusMessage] = useState('');
 
-    // Default settings for new pages
-    const [defaultSettings, setDefaultSettings] = useState({
-        genMode: 'full',
-        engine: 'pro',
-        colorMode: 'bw',
-        textDensity: 'dialog_fx',
-        aspectRatio: 'portrait',
-        artStyle: 'storybook_classic'
-    });
+    const [defaultSettings, setDefaultSettings] = useState({ ...fallbackDefaults, ...(aiDefaults || {}) });
 
-    // Per-page settings (indexed by page index)
     const [pageSettings, setPageSettings] = useState({});
-
-    // Batch generation state
     const [generatingPages, setGeneratingPages] = useState({});
     const [generatedResults, setGeneratedResults] = useState({});
     const [batchProgress, setBatchProgress] = useState(null);
+    const [generationQueue, setGenerationQueue] = useState(initialMetadata?.generationQueue || { items: [], state: 'idle' });
+    const [generationHistory, setGenerationHistory] = useState([]);
     const [expandedPages, setExpandedPages] = useState({});
-    
-    // Image editor state
     const [editingPageIndex, setEditingPageIndex] = useState(null);
     const [editingImageData, setEditingImageData] = useState(null);
 
+    const buildPageSettingsMap = (pages, fallbackSettings = defaultSettings) => {
+        const nextSettings = {};
+        (pages || []).forEach((page, idx) => {
+            nextSettings[idx] = getPageGenerationSettings(page, fallbackSettings);
+        });
+        return nextSettings;
+    };
+
+    const hydratePlannedPages = (pages, fallbackSettings = defaultSettings) => (
+        (pages || []).map((page) => ({
+            ...page,
+            generationSettings: getPageGenerationSettings(page, fallbackSettings),
+        }))
+    );
+
     useEffect(() => {
         if (initialMetadata && !isLocalUpdate) {
+            const hydratedPages = hydratePlannedPages(initialMetadata.plannedPages || []);
             setFullStory(initialMetadata.story || '');
-            setPlannedPages(initialMetadata.plannedPages || []);
-            
-            // Restore generatedResults from persisted plannedPages data
-            if (initialMetadata.plannedPages?.length > 0) {
-                const restoredResults = {};
-                initialMetadata.plannedPages.forEach((page, idx) => {
-                    if (page.generatedResult) {
-                        restoredResults[idx] = { success: true, result: page.generatedResult };
-                    }
-                });
-                if (Object.keys(restoredResults).length > 0) {
-                    setGeneratedResults(restoredResults);
-                }
-            }
-        }
-        if (isLocalUpdate) setIsLocalUpdate(false);
-    }, [initialMetadata]);
+            setPlannedPages(hydratedPages);
+            setGenerationQueue(initialMetadata.generationQueue || { items: [], state: 'idle' });
+            setPageSettings(buildPageSettingsMap(hydratedPages));
 
-    // Initialize page settings when pages are parsed
+            const restoredResults = {};
+            hydratedPages.forEach((page, idx) => {
+                if (page.generatedAsset) {
+                    restoredResults[idx] = { success: true, result: page.generatedAsset };
+                }
+            });
+            setGeneratedResults(restoredResults);
+        }
+    }, [initialMetadata, isLocalUpdate]);
+
+    useEffect(() => {
+        setDefaultSettings({ ...fallbackDefaults, ...(aiDefaults || {}) });
+    }, [aiDefaults]);
+
     useEffect(() => {
         if (plannedPages.length > 0) {
             const newSettings = {};
-            plannedPages.forEach((_, idx) => {
+            plannedPages.forEach((page, idx) => {
                 if (!pageSettings[idx]) {
-                    newSettings[idx] = { ...defaultSettings };
+                    newSettings[idx] = getPageGenerationSettings(page, defaultSettings);
                 }
             });
             if (Object.keys(newSettings).length > 0) {
-                setPageSettings(prev => ({ ...prev, ...newSettings }));
+                setPageSettings((prev) => ({ ...prev, ...newSettings }));
             }
         }
-    }, [plannedPages]);
+    }, [defaultSettings, pageSettings, plannedPages]);
 
-    const saveProjectState = async (story, pages) => {
+    const refreshGenerationHistory = async () => {
+        if (!projectId) return;
+        try {
+            setGenerationHistory(await getGenerationHistory(projectId));
+        } catch (error) {
+            console.error('Failed to load generation history:', error);
+        }
+    };
+
+    useEffect(() => {
+        refreshGenerationHistory();
+    }, [projectId]);
+
+    const saveProjectState = async (story, pages, extraPatch = {}) => {
         if (!projectId) return;
         setIsLocalUpdate(true);
         try {
-            const updatedData = { story, plannedPages: pages };
-            await fetch(`/api/projects/${projectId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(updatedData)
+            const updatedProject = await updateProject(projectId, {
+                ...extraPatch,
+                story,
+                plannedPages: clearInlineGeneratedResults(pages),
             });
-            if (onProjectUpdate) onProjectUpdate(updatedData);
+            onProjectUpdate?.(updatedProject);
+            return updatedProject;
         } catch (err) {
             console.error('Failed to save project state:', err);
+            setStatusMessage(err.message);
+            onNotify?.({ message: err.message, title: 'Project Save Failed', type: 'error' });
+            throw err;
+        } finally {
             setIsLocalUpdate(false);
         }
     };
 
+    const persistGenerationQueue = async (queue) => {
+        setGenerationQueue(queue);
+        await saveProjectState(fullStory, plannedPages, { generationQueue: queue });
+    };
+
     const handleParseStory = async () => {
-        if (!fullStory.trim()) return alert('Please enter your story text');
+        if (!fullStory.trim()) {
+            setStatusMessage('Please enter your story text.');
+            return;
+        }
 
         setIsPlanning(true);
         setGeneratedResults({});
         setPageSettings({});
+        setStatusMessage('');
         try {
             const assetList = [
-                ...library.characters.map(c => `[Character] ${c.name}`),
-                ...library.locations.map(l => `[Location] ${l.name}`),
-                ...library.style.map(s => `[Style] ${s.name}`)
+                ...library.characters.map((character) => `[Character] ${character.displayName || character.name} (${character.name}) ${character.role || ''} ${character.usage || ''} ${character.notes || ''}`.trim()),
+                ...library.locations.map((location) => `[Location] ${location.displayName || location.name} (${location.name}) ${location.role || ''} ${location.usage || ''} ${location.notes || ''}`.trim()),
+                ...library.style.map((style) => `[Style] ${style.displayName || style.name} (${style.name}) ${style.role || ''} ${style.usage || ''} ${style.notes || ''}`.trim()),
             ];
 
-            const res = await fetch('/api/plan', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    story: fullStory,
-                    assetList,
-                    appMode,
-                    targetPageCount: targetPageCount > 0 ? targetPageCount : null
-                })
+            const data = await requestPlanStory({
+                story: fullStory,
+                assetList,
+                appMode,
+                projectId,
+                targetPageCount: targetPageCount > 0 ? targetPageCount : null,
             });
 
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
+            if (onUsageUpdate) onUsageUpdate(data.route, data.usage);
 
-            if (onUsageUpdate) onUsageUpdate('pro', data.usage, false); // Story parsing is always text-based
-
-            const pages = Array.isArray(data) ? data : data.pages || [];
+            const pages = hydratePlannedPages(Array.isArray(data) ? data : data.pages || []);
             setPlannedPages(pages);
-            saveProjectState(fullStory, pages);
+            setPageSettings(buildPageSettingsMap(pages));
+            await saveProjectState(fullStory, pages);
+            await refreshGenerationHistory();
         } catch (err) {
-            alert('Planning failed: ' + err.message);
+            setStatusMessage(err.message);
+            onNotify?.({ message: err.message, title: 'Planning Failed', type: 'error' });
         } finally {
             setIsPlanning(false);
         }
@@ -127,8 +167,9 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
 
     const getReferencesForPage = (page) => {
         const refs = [];
-        [...library.characters, ...library.locations, ...library.style].forEach(item => {
-            if ((page.suggestedReferences || []).some(ref => ref.includes(item.name))) {
+        [...library.characters, ...library.locations, ...library.style].forEach((item) => {
+            const matchTerms = [item.name, item.displayName, item.role].filter(Boolean);
+            if ((page.suggestedReferences || []).some((ref) => matchTerms.some((term) => ref.includes(term)))) {
                 refs.push(item);
             }
         });
@@ -136,112 +177,143 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
     };
 
     const updatePageSetting = (pageIndex, setting, value) => {
-        setPageSettings(prev => ({
-            ...prev,
-            [pageIndex]: {
-                ...prev[pageIndex],
-                [setting]: value
-            }
-        }));
-    };
+        const nextSettings = {
+            ...getPageGenerationSettings(plannedPages[pageIndex], defaultSettings),
+            ...(pageSettings[pageIndex] || {}),
+            [setting]: value,
+        };
 
-    const updatePageContent = (pageIndex, newContent) => {
-        setPlannedPages(prevPages => {
-            const newPages = [...prevPages];
-            newPages[pageIndex] = { ...newPages[pageIndex], pageContent: newContent };
+        setPageSettings((prev) => ({
+            ...prev,
+            [pageIndex]: nextSettings,
+        }));
+        setPlannedPages((prevPages) => {
+            const newPages = mergePageAtIndex(prevPages, pageIndex, { generationSettings: nextSettings });
+            saveProjectState(fullStory, newPages).catch(() => {});
             return newPages;
         });
     };
 
-    const handleContentBlur = () => {
-        saveProjectState(fullStory, plannedPages);
+    const updatePageContent = (pageIndex, newContent) => {
+        setPlannedPages((prevPages) => mergePageAtIndex(prevPages, pageIndex, { pageContent: newContent }));
+    };
+
+    const handleContentBlur = (pageIndex, newContent) => {
+        setPlannedPages((prevPages) => {
+            const newPages = mergePageAtIndex(prevPages, pageIndex, { pageContent: newContent });
+            saveProjectState(fullStory, newPages).catch(() => {});
+            return newPages;
+        });
     };
 
     const applyDefaultsToAll = () => {
-        const newSettings = {};
-        plannedPages.forEach((_, idx) => {
-            newSettings[idx] = { ...defaultSettings };
+        const newPages = plannedPages.map((page) => ({
+            ...page,
+            generationSettings: { ...defaultSettings },
+        }));
+        setPageSettings(buildPageSettingsMap(newPages));
+        setPlannedPages(newPages);
+        saveProjectState(fullStory, newPages).catch(() => {});
+    };
+
+    const persistGeneratedImage = async (pageIndex, imageSource) => {
+        const { dataUrl } = await inlineImageToSavePayload(imageSource);
+        const { asset } = await saveAsset({
+            bucket: 'pages',
+            imageData: dataUrl,
+            pageIndex,
+            projectId,
         });
-        setPageSettings(newSettings);
+        return asset;
     };
 
     const generatePage = async (pageIndex, page) => {
-        const settings = pageSettings[pageIndex] || defaultSettings;
-        setGeneratingPages(prev => ({ ...prev, [pageIndex]: true }));
+        const settings = pageSettings[pageIndex] || getPageGenerationSettings(page, defaultSettings);
+        setGeneratingPages((prev) => ({ ...prev, [pageIndex]: true }));
+        setStatusMessage('');
 
         try {
             const matchedRefs = getReferencesForPage(page);
-            const referenceImages = await Promise.all(
-                matchedRefs.filter(item => item.type === 'image').map(async (item) => {
-                    const response = await fetch(item.url);
-                    const blob = await response.blob();
-                    return new Promise((resolve) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => resolve({
-                            name: item.name,
-                            data: reader.result
-                        });
-                        reader.readAsDataURL(blob);
-                    });
-                })
-            );
-
-            const res = await fetch('/api/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: page.pageContent,
-                    references: referenceImages,
-                    panels: page.panelCount || 3,
-                    mode: settings.genMode,
-                    engine: settings.engine,
-                    projectId,
-                    colorMode: settings.colorMode,
-                    textDensity: settings.textDensity,
-                    appMode,
-                    aspectRatio: settings.aspectRatio,
-                    artStyle: settings.artStyle
-                })
+            const referenceImages = await fetchAssetsAsReferences(matchedRefs);
+            const data = await requestGeneratePage({
+                prompt: page.pageContent,
+                references: referenceImages,
+                panels: page.panelCount || 3,
+                mode: settings.genMode,
+                projectId,
+                colorMode: settings.colorMode,
+                textDensity: settings.textDensity,
+                appMode,
+                aspectRatio: settings.aspectRatio,
+                artStyle: settings.artStyle,
             });
 
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-
-            if (onUsageUpdate) onUsageUpdate(settings.engine, data.usage, settings.genMode === 'full' || settings.genMode === 'storybook' || appMode === 'storybook');
+            if (onUsageUpdate) {
+                onUsageUpdate(data.route, data.usage);
+            }
 
             const resultObj = { success: true, result: data.result };
-            setGeneratedResults(prev => ({
+            setGeneratedResults((prev) => ({
                 ...prev,
-                [pageIndex]: resultObj
+                [pageIndex]: resultObj,
             }));
 
-            // Sync with plannedPages for persistence and preview
-            setPlannedPages(prevPages => {
-                const newPages = [...prevPages];
-                newPages[pageIndex] = { ...newPages[pageIndex], generatedResult: data.result };
-                saveProjectState(fullStory, newPages); // Persist to server
-                return newPages;
-            });
+            if (data.result?.type === 'image') {
+                const generatedAsset = await persistGeneratedImage(pageIndex, data.result);
+                setPlannedPages((prevPages) => {
+                    const newPages = updatePageGeneratedAsset(prevPages, pageIndex, generatedAsset);
+                    saveProjectState(fullStory, newPages).catch(() => {});
+                    return newPages;
+                });
+            }
+            await refreshGenerationHistory();
+            return { success: true };
         } catch (err) {
-            setGeneratedResults(prev => ({
+            setGeneratedResults((prev) => ({
                 ...prev,
-                [pageIndex]: { success: false, error: err.message }
+                [pageIndex]: { success: false, error: err.message },
             }));
+            setStatusMessage(err.message);
+            onNotify?.({ message: err.message, title: 'Page Generation Failed', type: 'error' });
+            return { success: false, error: err.message };
         } finally {
-            setGeneratingPages(prev => ({ ...prev, [pageIndex]: false }));
+            setGeneratingPages((prev) => ({ ...prev, [pageIndex]: false }));
         }
     };
 
     const handleBatchGenerate = async () => {
         if (plannedPages.length === 0) return;
 
+        const startedAt = new Date().toISOString();
+        const initialQueue = {
+            items: plannedPages.map((_, pageIndex) => ({ pageIndex, status: 'queued', updatedAt: startedAt, error: '' })),
+            state: 'running',
+            updatedAt: startedAt,
+        };
+        await persistGenerationQueue(initialQueue);
         setBatchProgress({ current: 0, total: plannedPages.length });
 
         for (let i = 0; i < plannedPages.length; i++) {
+            const runningQueue = {
+                ...initialQueue,
+                items: initialQueue.items.map((item) => (
+                    item.pageIndex === i ? { ...item, status: 'running', updatedAt: new Date().toISOString() } : item
+                )),
+                updatedAt: new Date().toISOString(),
+            };
+            setGenerationQueue(runningQueue);
             setBatchProgress({ current: i + 1, total: plannedPages.length });
-            await generatePage(i, plannedPages[i]);
+            const latestResult = await generatePage(i, plannedPages[i]);
+            initialQueue.items[i] = {
+                pageIndex: i,
+                status: latestResult?.success === false ? 'failed' : 'succeeded',
+                updatedAt: new Date().toISOString(),
+                error: latestResult?.error || '',
+            };
+            await persistGenerationQueue({ ...initialQueue, updatedAt: new Date().toISOString() });
         }
 
+        await persistGenerationQueue({ ...initialQueue, state: 'completed', updatedAt: new Date().toISOString() });
         setBatchProgress(null);
     };
 
@@ -250,145 +322,129 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
     };
 
     const handleSendToCreatorWithResult = (page, pageIndex) => {
-        const result = generatedResults[pageIndex];
-        const resultData = result?.result || page.generatedResult;
-        // Parse if it's a string (handles markdown-wrapped JSON)
-        const parsedResult = parseResultData(resultData);
+        const resultEntry = generatedResults[pageIndex];
+        const currentResult = getPersistedOrTransientResult(page, resultEntry);
+        const parsedResult = parseStoryboardResult(resultEntry?.result);
+
         onSendToCreator({
             ...page,
-            pageIndex,  // Include the page index so Creator can sync back
-            generatedResult: parsedResult || resultData
+            generationSettings: getPageGenerationSettings(page, defaultSettings),
+            pageIndex,
+            generatedAsset: page.generatedAsset || null,
+            generatedResult: parsedResult || currentResult,
         });
     };
 
-    // Open image editor for a page
-    const handleEditPage = (pageIndex) => {
-        const result = generatedResults[pageIndex];
-        const parsedResult = parseResultData(result?.result);
-        if (result?.success && parsedResult?.type === 'image') {
-            const imageDataUrl = `data:${parsedResult.mimeType};base64,${parsedResult.data}`;
+    const handleEditPage = async (pageIndex) => {
+        const imageSource = getPersistedOrTransientResult(plannedPages[pageIndex], generatedResults[pageIndex]);
+        if (!imageSource) {
+            return;
+        }
+
+        try {
+            const imageDataUrl = await toInlineImageDataUrl(imageSource);
             setEditingImageData(imageDataUrl);
             setEditingPageIndex(pageIndex);
+        } catch (error) {
+            setStatusMessage(error.message);
+            onNotify?.({ message: error.message, title: 'Editor Unavailable', type: 'error' });
         }
     };
 
-    // Handle save from image editor
-    const handleSaveEdit = (editedResult) => {
+    const handleSaveEdit = async (editedResult) => {
         if (editingPageIndex === null) return;
-        
-        // Update generatedResults
-        setGeneratedResults(prev => ({
-            ...prev,
-            [editingPageIndex]: { success: true, result: editedResult }
-        }));
 
-        // Sync with plannedPages for persistence
-        setPlannedPages(prevPages => {
-            const newPages = [...prevPages];
-            newPages[editingPageIndex] = { ...newPages[editingPageIndex], generatedResult: editedResult };
-            saveProjectState(fullStory, newPages);
-            return newPages;
-        });
+        try {
+            const generatedAsset = await persistGeneratedImage(editingPageIndex, editedResult);
+            setGeneratedResults((prev) => ({
+                ...prev,
+                [editingPageIndex]: { success: true, result: editedResult },
+            }));
 
-        // Close editor
-        setEditingPageIndex(null);
-        setEditingImageData(null);
+            setPlannedPages((prevPages) => {
+                const newPages = updatePageGeneratedAsset(prevPages, editingPageIndex, generatedAsset);
+                saveProjectState(fullStory, newPages).catch(() => {});
+                return newPages;
+            });
+        } catch (error) {
+            setStatusMessage(error.message);
+            onNotify?.({ message: error.message, title: 'Edit Save Failed', type: 'error' });
+        } finally {
+            setEditingPageIndex(null);
+            setEditingImageData(null);
+        }
     };
 
-    // Close image editor without saving
     const handleCloseEditor = () => {
         setEditingPageIndex(null);
         setEditingImageData(null);
     };
 
-    // Upload handler for replacing generated images with uploaded ones
-    const handlePageImageUpload = (pageIndex, e) => {
-        const file = e.target.files[0];
+    const handlePageImageUpload = (pageIndex, event) => {
+        const file = event.target.files[0];
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = (event) => {
-            const dataUrl = event.target.result;
-            const base64Data = dataUrl.split(',')[1];
-            const mimeType = file.type || 'image/png';
+        reader.onload = async (loadEvent) => {
+            try {
+                const dataUrl = loadEvent.target.result;
+                const uploadedResult = {
+                    type: 'image',
+                    data: dataUrl.split(',')[1],
+                    mimeType: file.type || 'image/png',
+                };
+                const generatedAsset = await persistGeneratedImage(pageIndex, uploadedResult);
 
-            const uploadedResult = {
-                type: 'image',
-                data: base64Data,
-                mimeType: mimeType
-            };
-
-            // Update generatedResults
-            setGeneratedResults(prev => ({
-                ...prev,
-                [pageIndex]: { success: true, result: uploadedResult }
-            }));
-
-            // Sync with plannedPages for persistence
-            setPlannedPages(prevPages => {
-                const newPages = [...prevPages];
-                newPages[pageIndex] = { ...newPages[pageIndex], generatedResult: uploadedResult };
-                saveProjectState(fullStory, newPages);
-                return newPages;
-            });
+                setGeneratedResults((prev) => ({
+                    ...prev,
+                    [pageIndex]: { success: true, result: uploadedResult },
+                }));
+                setPlannedPages((prevPages) => {
+                    const newPages = updatePageGeneratedAsset(prevPages, pageIndex, generatedAsset);
+                    saveProjectState(fullStory, newPages).catch(() => {});
+                    return newPages;
+                });
+            } catch (error) {
+                setStatusMessage(error.message);
+                onNotify?.({ message: error.message, title: 'Upload Failed', type: 'error' });
+            }
         };
         reader.readAsDataURL(file);
-        e.target.value = ''; // Reset input
+        event.target.value = '';
     };
 
-    // Helper to parse result data, handling markdown-wrapped JSON strings
-    const parseResultData = (resultData) => {
-        if (!resultData) return null;
-        if (typeof resultData === 'object') return resultData;
-        if (typeof resultData === 'string') {
-            try {
-                let textToParse = resultData.trim();
-                if (textToParse.startsWith('```')) {
-                    textToParse = textToParse.replace(/^```(?:json)?\s*\n?/, '');
-                    textToParse = textToParse.replace(/\n?```\s*$/, '');
-                }
-                return JSON.parse(textToParse);
-            } catch (e) {
-                return null;
-            }
-        }
-        return null;
-    };
+    const renderGeneratedPreview = (pageIndex, page) => {
+        const resultEntry = generatedResults[pageIndex];
+        const currentResult = getPersistedOrTransientResult(page, resultEntry);
 
-    const renderGeneratedPreview = (pageIndex) => {
-        const result = generatedResults[pageIndex];
-        if (!result) return null;
-
-        if (!result.success) {
+        if (resultEntry && !resultEntry.success) {
             return (
                 <div className="generation-error">
-                    <span>⚠️</span> {result.error}
+                    <span>Warning</span> {resultEntry.error}
                 </div>
             );
         }
 
-        // Parse the result data (handles string results with markdown wrapping)
-        const parsedResult = parseResultData(result.result);
+        if (!currentResult) return null;
 
-        if (parsedResult?.type === 'image') {
+        const imageSrc = getDisplayImageSrc(currentResult);
+        if (imageSrc) {
             return (
                 <div className="generated-preview">
-                    <img
-                        src={`data:${parsedResult.mimeType};base64,${parsedResult.data}`}
-                        alt="Generated page"
-                    />
-                    <div className="preview-badge">✓ Generated</div>
+                    <img src={imageSrc} alt="Generated page" />
+                    <div className="preview-badge">Saved Preview</div>
                 </div>
             );
         }
 
+        const parsedResult = parseStoryboardResult(resultEntry?.result);
         if (parsedResult?.panels) {
             return (
                 <div className="storyboard-preview">
-                    <div className="preview-badge storyboard">📋 Storyboard Ready</div>
+                    <div className="preview-badge storyboard">Storyboard Ready</div>
                     <div className="mini-panels">
-                        {parsedResult.panels.slice(0, 4).map((panel, i) => (
-                            <div key={i} className="mini-panel">
+                        {parsedResult.panels.slice(0, 4).map((panel, index) => (
+                            <div key={index} className="mini-panel">
                                 <span className="mini-panel-num">{panel.panelNumber}</span>
                             </div>
                         ))}
@@ -403,7 +459,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
         return null;
     };
 
-    const completedCount = Object.values(generatedResults).filter(r => r?.success).length;
+    const completedCount = plannedPages.filter((page, index) => Boolean(getPersistedOrTransientResult(page, generatedResults[index]))).length;
 
     return (
         <div className="planner-layout animate-in">
@@ -411,7 +467,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
             <aside className="planner-sidebar">
                 <div className="sidebar-section">
                     <h2 className="heading-font sidebar-title">
-                        <span className="title-icon">📖</span>
+                        <span className="title-icon">TXT</span>
                         Story Parser
                     </h2>
                     <p className="sidebar-desc">
@@ -420,6 +476,8 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                             : 'Paste your script or story. AI will break it into manga pages with individual generation settings.'}
                     </p>
                 </div>
+
+                <StatusMessage message={statusMessage} tone="error" />
 
                 <div className="field-group">
                     <label className="field-label">Story Script</label>
@@ -430,6 +488,8 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                         onChange={(e) => setFullStory(e.target.value)}
                     />
                 </div>
+
+                <StatusMessage message={statusMessage} tone="error" />
 
                 <div className="field-group">
                     <label className="field-label">Target Pages (0 for Auto)</label>
@@ -454,7 +514,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                     {isPlanning ? (
                         <><span className="btn-loader"></span> Analyzing...</>
                     ) : (
-                        '✨ Parse to Pages'
+                        'Parse to Pages'
                     )}
                 </button>
 
@@ -463,12 +523,12 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                         {/* Generation Settings Section */}
                         <div className="sidebar-settings-section">
                             <div className="settings-section-header">
-                                <span className="settings-section-icon">⚙️</span>
+                                <span className="settings-section-icon">CFG</span>
                                 <span className="settings-section-title">Generation Settings</span>
                             </div>
-                            
+
                             <div className="settings-card">
-                                <div className="settings-card-header">Engine & Output</div>
+                                <div className="settings-card-header">Output</div>
                                 <div className="settings-grid">
                                     {appMode !== 'storybook' && (
                                         <div className="field-group compact">
@@ -483,18 +543,6 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                             </select>
                                         </div>
                                     )}
-
-                                    <div className="field-group compact">
-                                        <label className="field-label">Engine</label>
-                                        <select
-                                            className="input-glass"
-                                            value={defaultSettings.engine}
-                                            onChange={(e) => setDefaultSettings(prev => ({ ...prev, engine: e.target.value }))}
-                                        >
-                                            <option value="flash">Nano Banana</option>
-                                            <option value="pro">Nano Banana Pro</option>
-                                        </select>
-                                    </div>
 
                                     <div className="field-group compact">
                                         <label className="field-label">Color</label>
@@ -550,7 +598,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                             {appMode === 'storybook' && (
                                 <div className="settings-card mode-specific storybook">
                                     <div className="settings-card-header">
-                                        <span>🎨</span> Art Style
+                                        <span>Style</span> Art Style
                                     </div>
                                     <div className="settings-grid">
                                         <div className="field-group compact" style={{ gridColumn: '1 / -1' }}>
@@ -575,7 +623,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                             {appMode !== 'storybook' && (
                                 <div className="settings-card mode-specific manga">
                                     <div className="settings-card-header">
-                                        <span>💬</span> Text & Dialogue
+                                        <span>Text</span> Text & Dialogue
                                     </div>
                                     <div className="settings-grid">
                                         <div className="field-group compact" style={{ gridColumn: '1 / -1' }}>
@@ -617,7 +665,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                         Generating {batchProgress.current}/{batchProgress.total}...
                                     </>
                                 ) : (
-                                    <>✨ Generate All Pages</>
+                                    <>Generate All Pages</>
                                 )}
                             </button>
 
@@ -634,6 +682,35 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                     </span>
                                 </div>
                             )}
+                            {generationQueue?.items?.length > 0 && (
+                                <div className="queue-status">
+                                    <strong>Batch Queue: {generationQueue.state}</strong>
+                                    <span>
+                                        {generationQueue.items.filter((item) => item.status === 'succeeded').length} succeeded /{' '}
+                                        {generationQueue.items.filter((item) => item.status === 'failed').length} failed
+                                    </span>
+                                </div>
+                            )}
+                            {generationHistory.length > 0 && (
+                                <div className="generation-history-panel">
+                                    <div className="generation-history-title">Recent AI Runs</div>
+                                    {generationHistory.slice(0, 5).map((entry) => (
+                                        <button
+                                            key={entry.id}
+                                            type="button"
+                                            className="generation-history-item"
+                                            onClick={() => onNotify?.({
+                                                message: `${entry.route?.provider || 'route'}:${entry.route?.model || entry.route?.routeKey || 'configured'} / ${entry.resultType || 'result'} / ${(entry.references || []).length} refs`,
+                                                title: entry.operation,
+                                                type: 'info',
+                                            })}
+                                        >
+                                            <span>{entry.operation}</span>
+                                            <small>{new Date(entry.timestamp).toLocaleString()}</small>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </>
                 )}
@@ -643,7 +720,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
             <main className="planner-content">
                 {plannedPages.length === 0 && !isPlanning && (
                     <div className="empty-state glass-panel">
-                        <div className="empty-icon">📚</div>
+                        <div className="empty-icon">[]</div>
                         <h3>No Pages Planned Yet</h3>
                         <p>Enter your story on the left and click "Parse to Pages" to begin.</p>
                     </div>
@@ -670,9 +747,8 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                 const matchedRefs = getReferencesForPage(page);
                                 const isGenerating = generatingPages[idx];
                                 const hasResult = generatedResults[idx];
-                                const parsedResultData = hasResult?.success ? parseResultData(hasResult.result) : null;
                                 const isExpanded = expandedPages[idx];
-                                const settings = pageSettings[idx] || defaultSettings;
+                                const settings = pageSettings[idx] || getPageGenerationSettings(page, defaultSettings);
 
                                 return (
                                     <div
@@ -685,12 +761,12 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                 {page.pageNumber || idx + 1}
                                             </div>
                                             <div className="page-meta">
-                                                <span className="panel-count">{appMode === 'storybook' ? '🎨 Illustration' : `${page.panelCount} Panels`}</span>
-                                                {hasResult?.success && <span className="status-dot success">●</span>}
-                                                {hasResult && !hasResult.success && <span className="status-dot error">●</span>}
+                                                <span className="panel-count">{appMode === 'storybook' ? 'Illustration' : `${page.panelCount} Panels`}</span>
+                                                {getPersistedOrTransientResult(page, hasResult) && <span className="status-dot success">+</span>}
+                                                {hasResult && !hasResult.success && <span className="status-dot error">!</span>}
                                             </div>
                                             <button className="expand-btn">
-                                                {isExpanded ? '▼' : '▶'}
+                                                {isExpanded ? 'v' : '>'}
                                             </button>
                                         </div>
 
@@ -703,27 +779,18 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                     onChange={(e) => updatePageSetting(idx, 'genMode', e.target.value)}
                                                     title="Generation Mode"
                                                 >
-                                                    <option value="storyboard">📋 Storyboard</option>
-                                                    <option value="full">🎨 Full Art</option>
+                                                    <option value="storyboard">Storyboard</option>
+                                                    <option value="full">Full Art</option>
                                                 </select>
                                             )}
-                                            <select
-                                                className="page-setting-select"
-                                                value={settings.engine}
-                                                onChange={(e) => updatePageSetting(idx, 'engine', e.target.value)}
-                                                title="Engine"
-                                            >
-                                                <option value="flash">⚡ Fast</option>
-                                                <option value="pro">✨ Pro</option>
-                                            </select>
                                             <select
                                                 className="page-setting-select"
                                                 value={settings.colorMode}
                                                 onChange={(e) => updatePageSetting(idx, 'colorMode', e.target.value)}
                                                 title="Color Mode"
                                             >
-                                                <option value="bw">⬛ B&W</option>
-                                                <option value="color">🌈 Color</option>
+                                                <option value="bw">B&W</option>
+                                                <option value="color">Color</option>
                                             </select>
                                             <select
                                                 className="page-setting-select"
@@ -735,12 +802,12 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                 }}
                                                 title="Aspect Ratio"
                                             >
-                                                <option value="portrait">📐 Port (2:3)</option>
-                                                <option value="landscape">📐 Land (3:2)</option>
-                                                <option value="square">📐 Sq (1:1)</option>
-                                                <option value="3:4">📐 Book (3:4)</option>
-                                                <option value="cinematic">📐 Cine (16:9)</option>
-                                                <option value="custom">✏️ Custom...</option>
+                                                <option value="portrait">Portrait (2:3)</option>
+                                                <option value="landscape">Landscape (3:2)</option>
+                                                <option value="square">Square (1:1)</option>
+                                                <option value="3:4">Book (3:4)</option>
+                                                <option value="cinematic">Cinematic (16:9)</option>
+                                                <option value="custom">Custom...</option>
                                             </select>
 
                                             {appMode === 'storybook' ? (
@@ -751,12 +818,12 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                         onChange={(e) => updatePageSetting(idx, 'artStyle', e.target.value)}
                                                         title="Art Style"
                                                     >
-                                                        <option value="storybook_classic">🎨 Classic</option>
-                                                        <option value="watercolor">🎨 Water</option>
-                                                        <option value="oil_painting">🎨 Oil</option>
-                                                        <option value="digital_illustration">🎨 Digital</option>
-                                                        <option value="anime">🎨 Anime</option>
-                                                        <option value="realistic">🎨 Real</option>
+                                                        <option value="storybook_classic">Classic</option>
+                                                        <option value="watercolor">Watercolor</option>
+                                                        <option value="oil_painting">Oil Painting</option>
+                                                        <option value="digital_illustration">Digital</option>
+                                                        <option value="anime">Anime</option>
+                                                        <option value="realistic">Realistic</option>
                                                     </select>
                                                 </>
                                             ) : (
@@ -766,11 +833,11 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                     onChange={(e) => updatePageSetting(idx, 'textDensity', e.target.value)}
                                                     title="Text Density"
                                                 >
-                                                    <option value="minimal">💭 Minimal</option>
-                                                    <option value="dialog">💬 Dialog</option>
-                                                    <option value="dialog_fx">💥 Dialog+FX</option>
-                                                    <option value="dialog_fx_narration">📝 +Narration</option>
-                                                    <option value="full">📖 Full</option>
+                                                    <option value="minimal">Minimal</option>
+                                                    <option value="dialog">Dialog</option>
+                                                    <option value="dialog_fx">Dialog + FX</option>
+                                                    <option value="dialog_fx_narration">Dialog + FX + Narration</option>
+                                                    <option value="full">Full</option>
                                                 </select>
                                             )}
                                         </div>
@@ -805,7 +872,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                         )}
 
                                         {/* Generated Preview */}
-                                        {renderGeneratedPreview(idx)}
+                                        {renderGeneratedPreview(idx, page)}
 
                                         {/* Expandable Content */}
                                         <div className={`page-content ${isExpanded ? 'expanded' : ''}`}>
@@ -813,7 +880,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                 className="content-text-editable input-glass"
                                                 value={page.pageContent}
                                                 onChange={(e) => updatePageContent(idx, e.target.value)}
-                                                onBlur={handleContentBlur}
+                                                onBlur={(e) => handleContentBlur(idx, e.target.value)}
                                                 placeholder="Enter prompt or story text..."
                                                 style={{ width: '100%', minHeight: '80px', background: 'rgba(255,255,255,0.05)', border: 'none', resize: 'vertical' }}
                                             />
@@ -821,7 +888,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                             {(page.suggestedReferences || []).length > 0 && (
                                                 <div className="ref-tags">
                                                     {page.suggestedReferences.map((ref, i) => (
-                                                        <span key={i} className="ref-tag">📎 {ref}</span>
+                                                        <span key={i} className="ref-tag">Ref: {ref}</span>
                                                     ))}
                                                 </div>
                                             )}
@@ -837,18 +904,18 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                 {isGenerating ? (
                                                     <><span className="btn-loader small"></span> Generating...</>
                                                 ) : hasResult?.success ? (
-                                                    '↻ Regenerate'
+                                                    'Regenerate'
                                                 ) : (
-                                                    '⚡ Generate'
+                                                    'Generate'
                                                 )}
                                             </button>
-                                            {hasResult?.success && parsedResultData?.type === 'image' && (
+                                            {getDisplayImageSrc(getPersistedOrTransientResult(page, hasResult)) && (
                                                 <button
                                                     className="action-btn edit"
                                                     onClick={() => handleEditPage(idx)}
                                                     title="Edit this image"
                                                 >
-                                                    ✏️ Edit
+                                                    Edit
                                                 </button>
                                             )}
                                             <button
@@ -856,7 +923,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                 onClick={() => pageUploadRefs.current[idx]?.click()}
                                                 title="Upload an image instead of generating"
                                             >
-                                                📤 Upload
+                                                Upload
                                             </button>
                                             <input
                                                 ref={el => pageUploadRefs.current[idx] = el}
@@ -869,7 +936,7 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                                                 className="action-btn send"
                                                 onClick={() => handleSendToCreatorWithResult(page, idx)}
                                             >
-                                                Open in Creator →
+                                                Open in Creator
                                             </button>
                                         </div>
                                     </div>
@@ -886,8 +953,8 @@ const PlannerView = ({ library, onSendToCreator, projectId, initialMetadata, onU
                 onClose={handleCloseEditor}
                 imageData={editingImageData}
                 onSaveEdit={handleSaveEdit}
-                engine="pro"
                 projectId={projectId}
+                onNotify={onNotify}
             />
         </div >
     );

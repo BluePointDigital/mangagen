@@ -1,143 +1,239 @@
-# Manga Generator | Nano Banana Edition
+# MangaGen
 
-![Manga Generator Cover](examples/mangagen-cover-photo.png)
+![MangaGen Cover](examples/mangagen-cover-photo.png)
 
-A professional-grade, AI-powered workspace for creating manga, comics, and illustrated storybooks. Leveraging Google Gemini's advanced multimodal capabilities, this application transforms raw text into fully realized visual narratives with precise control over layout, style, and composition.
+MangaGen is a local-first workspace for planning, generating, editing, assembling, importing, and exporting manga pages and illustrated storybooks. It stores project metadata and generated assets on disk, serves the app through an Express backend, and routes AI work through configurable providers instead of hardcoded per-screen model choices.
 
+## Changes since the last release
 
----
+This branch updates the older Gemini/Nano Banana release into a more portable, provider-routed local app.
 
-## ⚡ Quick Start
+- Added an Express backend app with validated filesystem storage, project metadata persistence, static production serving, and local-only browser origin protection.
+- Added global AI Settings with provider tabs for Google, OpenAI, OpenRouter, and custom OpenAI-compatible endpoints.
+- Replaced per-page Basic/Pro, Flash/Pro, and Engine selectors with operation routes configured once in AI Settings.
+- Split AI routing by operation: story planner, storyboard text, page image, panel image, and image edit.
+- Added route-based cost estimates so the usage footer is no longer tied to Google-labeled pricing.
+- Added project import and export as portable `.mangagen.zip` bundles.
+- Added Docker deployment as a single local container with persistent `/data` storage.
+- Added `DATA_DIR` support for Docker and other non-repo data locations.
+- Added generation history storage for prompts, references, usage, outputs, timestamps, and route metadata.
+- Added persistent batch queue state for page generation status.
+- Added project-scoped asset buckets for characters, locations, style references, and generated pages.
+- Updated saved projects to schema v2 with generated asset references instead of embedded base64 blobs.
+- Added storybook booklet data, cover assets, richer export behavior, and helper tests around text normalization and imposition.
+- Added automated server and shared client helper tests.
+- Added production build checks and bundle splitting around heavier editor/export views.
 
-### 1. Prerequisites
-- **Node.js** (v18+ recommended)
-- **Google Gemini API Key**: Obtain from [Google AI Studio](https://aistudio.google.com/).
+## Local-first status
 
-### 2. Installation
+This repository is currently designed for local use.
+
+- Project data uses `schemaVersion: 2`.
+- Generated and uploaded page images are stored as files under `projects/<project-id>/pages/`.
+- Global AI settings are stored under `settings/ai-config.json` in the app data root.
+- Provider API keys are saved locally and are never returned to the frontend after save.
+- Existing pre-v2 project folders are intentionally not supported. Delete old local projects or import/export through a compatible build.
+
+## Stack
+
+- Frontend: React 19 + Vite
+- Backend: Express 5 + local filesystem storage
+- AI: Provider-routed adapters for Google Gemini, OpenAI, OpenRouter, and custom OpenAI-compatible endpoints
+- Canvas and layout tools: Konva, react-konva
+- Storybook editor/export: TipTap, html2canvas, jsPDF
+- Tests: Node test runner
+- Deployment: Local Node process or single Docker container
+
+## Folder layout
+
+- `server/`: Express app, validation, storage, AI settings, AI provider routing, history, and portability services
+- `src/`: React app and shared client helpers
+- `tests/`: server and shared-helper tests
+- `projects/<project-id>/project.json`: project metadata and planned pages
+- `projects/<project-id>/pages/`: generated or uploaded page images
+- `projects/<project-id>/characters/`: project-scoped character references
+- `projects/<project-id>/locations/`: project-scoped location references
+- `projects/<project-id>/style/`: project-scoped style references
+- `projects/<project-id>/generation-history.json`: prompt, usage, route, reference, and output audit history
+- `characters/`, `locations/`, `style/`: optional root-level local asset buckets
+- `settings/ai-config.json`: global provider, route, defaults, and cost estimate settings
+- `Dockerfile`: production container build
+
+## Setup
+
+1. Install dependencies.
+
 ```bash
-# Clone the repository and install dependencies
 npm install
 ```
 
-### 3. Configuration
-Create a `.env` file in the root directory (copy from `.env.example` if available):
-```env
-GOOGLE_API_KEY=your_api_key_here
-PORT=3001
+2. Create `.env` from `.env-sample`.
 
-# Optional: Override default models
-# CREATOR_FLASH_MODEL=gemini-3-flash-preview
-# CREATOR_PRO_MODEL=gemini-3-pro-preview
-# CREATOR_IMAGE_MODEL_FLASH=gemini-2.5-flash-image
-# CREATOR_IMAGE_MODEL_PRO=gemini-3-pro-image-preview
+```bash
+copy .env-sample .env
 ```
 
-### 4. Run the Application
-Start both the backend server and the frontend development environment in a single command:
+3. Add at least one provider key or configure a custom local endpoint in AI Settings.
+
+```env
+GOOGLE_API_KEY=your_google_key_here
+OPENAI_API_KEY=your_openai_key_here
+OPENROUTER_API_KEY=your_openrouter_key_here
+CUSTOM_AI_BASE_URL=http://localhost:1234/v1
+```
+
+Environment variables are bootstrap and fallback values. Saved AI Settings override them after the settings file exists.
+
+4. Start the backend and frontend together.
+
 ```bash
 npm run launch
 ```
-The app will be available at [http://localhost:5173](http://localhost:5173).
 
----
+Frontend: [http://localhost:5173](http://localhost:5173)
+Backend: [http://localhost:3001](http://localhost:3001)
 
-## 🎨 Core Features
+## Scripts
 
-### 📖 Dual Mode Support
-- **Manga Mode**: Focuses on panel-based layouts, dynamic dialogue bubbles (coming soon), and action-oriented composition.
-- **Storybook Mode**: Optimized for full-page illustrations with elegant text overlays, perfect for children's books or visual novels.
+- `npm run launch`: run the Express server and Vite dev server together
+- `npm run server`: run only the backend
+- `npm run dev`: run only the Vite frontend
+- `npm run build`: production build check
+- `npm test`: run server and shared-helper tests
+- `npm start`: run the production Express server entry point
 
-<div align="center">
-  <img src="examples/manga-creator-studio-page-layout.png" width="45%" alt="Manga Mode" />
-  <img src="examples/storybook-creator-studio.png" width="45%" alt="Storybook Mode" />
-</div>
+## Docker
 
-### 📝 Story Planner
-- **AI Decomposition**: Automatically breaks long story scripts into logical page segments.
-- **Visual Anchors**: Extracts exact verbatim text for captions and dialogue.
-- **Batch Generation**: Queue up an entire project and let the AI generate blueprints for every page.
-- **Style Persistence**: Define a global art style to maintain consistency across the entire book.
+Build and run MangaGen as a single local-first container:
 
-![Story Planner](examples/storybook-story-planner.png)
+```bash
+docker build -t mangagen .
+docker run -p 3001:3001 -v mangagen-data:/data -e GOOGLE_API_KEY=your_api_key_here mangagen
+```
 
-### 🎭 Creator Studio (Manga Mode)
-- **70+ Dynamic Layouts**: Choose from a vast library of panel configurations, from simple grids to complex diagonal action splits.
-- **Live Layout Preview**: Drag, scale, and reposition panels in real-time using a **Konva-based** WYSIWYG editor.
-- **Panel-Level Control**: Assign specific art styles, aspect ratios, and AI engines to individual panels.
-- **Gutter Customization**: Adjust spacing and colors between panels for the perfect aesthetic.
+Open [http://localhost:3001](http://localhost:3001).
 
-<div align="center">
-  <img src="examples/manga-creator-studio-page-layout-editor.png" width="45%" alt="Layout Editor" />
-  <img src="examples/manga-page-storyboard.png" width="45%" alt="Storyboard View" />
-</div>
+The container stores projects, library assets, generated pages, generation history, batch queue state, and global AI settings under `/data`.
 
-### ✍️ Storybook Assembler (Storybook Mode)
-- **TipTap Integration**: Full rich text editing (Bold, Italic, Colors, Lists) for page content.
-- **Responsive Overlays**: 5+ layout presets for text placement (Top, Bottom, Sidebars, Floating).
-- **Typography Engine**: Fine-grained control over font family, size, line height, and letter spacing.
-- **Export Options**: Download individual pages as high-res PNGs or export the entire project as a professional PDF.
+You can also pass an env file:
 
-<div align="center">
-  <img src="examples/storybook-creator-studio-edit-options.png" width="45%" alt="Edit Options" />
-  <img src="examples/storybook-book-assembly.png" width="45%" alt="Book Assembly" />
-</div>
+```bash
+docker run -p 3001:3001 -v mangagen-data:/data --env-file .env mangagen
+```
 
-### 🖌️ AI Image Editor
-- **Brush-Based Editing**: Highlight specific areas of an image and tell the AI what to change (In-painting).
-- **Character Insertion**: Select characters from your library and "drop" them into an existing scene with AI assistance.
-- **Dimension Matching**: Edits preserve the original image resolution and aspect ratio seamlessly.
+## AI providers and routes
 
-<div align="center">
-  <img src="examples/image-editing-inpainting.png" width="45%" alt="In-painting" />
-  <img src="examples/image-inpainting-completed-review.png" width="45%" alt="Completed Review" />
-</div>
+Open AI Settings from the Project menu to configure credentials, provider capabilities, model IDs, operation routes, generation defaults, and cost estimates.
 
-### 📂 Asset Library & References
-- **Global & Project Libraries**: Manage characters, locations, and style references.
-- **Visual Prompting**: Assets selected in the library are automatically passed to the AI as visual references to maintain character and environment consistency.
+Supported provider options:
 
-![Asset Library](examples/asset-library.png)
+- Google: Gemini text, image generation, and image editing behavior.
+- OpenAI: text routing and image routes through OpenAI image-capable APIs.
+- OpenRouter: OpenAI-compatible text/chat routing.
+- Custom: OpenAI-compatible local or private endpoint, such as LM Studio, Ollama gateway, vLLM, or similar tools.
 
----
+Operation routes:
 
-## 🤖 AI Engine & Cost Tracking
-- **Gemini Flash & Pro**: Seamlessly toggle between "Flash" for rapid iteration and "Pro" for final high-fidelity artwork.
-- **Real-Time Usage Metrics**: Monitor token consumption (Input/Output) for every generation.
-- **Cost Estimation**: Built-in pricing calculator to track your API spending in real-time.
+- Story Planner: text route for turning a story into planned pages.
+- Storyboard JSON: text route for manga storyboard blueprints.
+- Page Images: image route for full page or storybook illustration generation.
+- Panel Images: image route for individual manga panel generation.
+- Image Editing: image route for edit and insert workflows.
 
----
+Planner, Creator, panel generation, and image editing no longer ask users to choose Basic/Pro, Flash/Pro, or Engine. Creative controls remain in the generation UI, while provider and model routing live in AI Settings.
 
-## 📁 Project Structure
-- `projects/`: Contains individual project folders, metadata (`project.json`), and generated assets.
-- `characters/`, `locations/`, `style/`: Global library for reusable assets.
-- `server.js`: Node.js/Express backend managing file system operations and Gemini API proxying.
-- `src/`: React frontend containing the specialized views and components.
+## Cost estimates
 
----
+The usage footer uses the configured cost estimates for the route that handled each AI response. Each route stores:
 
-## 🛠️ Tech Stack
-- **Frontend**: React 19, Vite, Tailwind CSS (for layout)
-- **Canvas**: Konva / react-konva for complex image manipulation
-- **Text Editing**: TipTap / ProseMirror
-- **Backend**: Node.js, Express
-- **AI**: Google Generative AI (@google/generative-ai)
-- **Export**: html2canvas, jspdf
+- input token cost
+- output token cost
+- image or output flat cost
 
----
+These numbers are estimates, not a billing ledger. Update them in AI Settings to match the provider and model pricing you actually use.
 
-## 💡 Pro Tips
-- Use **Character Sheets** in your library for best consistency.
-- In the **Planner**, use "Full" text density if you want the AI to handle all dialogue and FX.
-- The **Konva Preview** renders at exactly 800x1200 for standard manga proportions.
+## Project portability
 
----
+Use Export Project from the Project menu or project list to download a `.mangagen.zip` bundle. The bundle includes:
 
-Developed with ❤️ for Manga Creators.
+- `mangagen-export.json` manifest
+- `project.json`
+- project asset folders
+- asset metadata JSON files
+- generated page images
+- booklet data
+- generation queue state
+- `generation-history.json`
 
----
+Exports do not include global AI settings or provider secrets.
 
-## 🖼️ Final Examples
+Use Import Project on the project selector to restore a bundle. If the project ID already exists, MangaGen imports it with a conflict-safe suffix.
 
-| Cover Art | Page 1 | Page 2 |
-| :---: | :---: | :---: |
-| <img src="examples/example-book-cover.jpg" width="100%" /> | <img src="examples/example-book-page-1.jpg" width="100%" /> | <img src="examples/example-book-page-2.jpg" width="100%" /> |
+## Storage model
+
+Projects persist file references instead of embedding base64 image blobs in `project.json`.
+
+Each saved page can include:
+
+```json
+{
+  "generatedAsset": {
+    "bucket": "pages",
+    "filename": "page-001.png",
+    "url": "/projects/my-book/pages/page-001.png",
+    "mimeType": "image/png",
+    "updatedAt": "2026-03-09T12:00:00.000Z"
+  }
+}
+```
+
+The server stores the file on disk and only persists the metadata needed to rehydrate that asset later. Inline image payloads are treated as transient UI state and are stripped before project metadata is saved.
+
+## Core workflows
+
+### Story Planner
+
+- Paste a story and split it into planned pages.
+- Use global defaults for mode, color, aspect ratio, style, and text density.
+- Edit planned pages and creative settings without choosing provider/model per page.
+- Batch-generate pages and keep queue status in project metadata.
+- Review recent AI runs from generation history.
+
+### Creator Studio
+
+- Generate manga storyboard blueprints or full page art.
+- Draw individual panels from a storyboard.
+- Select layouts, preview page assembly, and finalize manga pages.
+- Edit generated page or panel images through the image editor.
+- Save outputs to the project library and sync them back to the planner.
+
+### Storybook Assembler
+
+- Assemble storybook pages with rich text overlays.
+- Edit typography, colors, alignment, covers, and booklet settings.
+- Export pages, full PDFs, and booklet PDFs.
+
+### Asset Library
+
+- Upload project-scoped characters, locations, and style references.
+- Store metadata such as display name, role/type, usage, and notes.
+- Use references in planner and creator workflows.
+
+## Verification
+
+Current checks used for this release pass:
+
+```bash
+npm test
+npm run build
+docker build -t mangagen .
+```
+
+The automated tests cover API behavior, AI settings migration, provider route errors, route metadata, project import/export, path safety, asset persistence, schema hydration, story extraction, storybook text normalization, and booklet imposition math. Full interactive planning/generation/editing workflows should still be smoke-tested manually with your configured providers.
+
+## Notes
+
+- Project IDs are slugified from the project name and must remain filesystem-safe.
+- Asset saves are bucket-scoped and validated before any file write.
+- In dev, Vite proxies `/api`, `/library`, and `/projects` so asset URLs behave the same as production builds.
+- The app is local-first and not designed as a public multi-user cloud service yet.

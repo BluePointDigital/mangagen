@@ -2,176 +2,250 @@ import React, { useState, useEffect, useRef } from 'react';
 import ImageEditorModal from './ImageEditorModal';
 import LayoutSelector from './LayoutSelector';
 import LayoutPreviewKonva from './LayoutPreviewKonva';
+import StatusMessage from './ui/StatusMessage';
 import { getLayoutsByPanelCount } from '../data/layoutTemplates';
+import { generatePage as requestGeneratePage, generatePanel as requestGeneratePanel, saveAsset } from '../lib/api.mjs';
+import {
+    fetchAssetAsDataUrl,
+    getDisplayImageSrc,
+    inlineImageToSavePayload,
+    isInlineImageResult,
+    isPersistedAsset,
+} from '../lib/assets.mjs';
+import { parseStoryboardResult } from '../lib/results.mjs';
 
-const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, projectId, onUsageUpdate, appMode, onSyncToPlanner }) => {
+const fallbackDefaults = {
+    artStyle: 'storybook_classic',
+    aspectRatio: 'portrait',
+    colorMode: 'bw',
+    genMode: 'storyboard',
+    textDensity: 'dialog_fx',
+};
+
+const CreatorView = ({ aiDefaults, library, onRefresh, initialData, projectId, onUsageUpdate, appMode, onSyncToPlanner, onNotify }) => {
+    const mergedDefaults = { ...fallbackDefaults, ...(aiDefaults || {}) };
     const [story, setStory] = useState('');
     const [panels, setPanels] = useState(3);
     const [selectedRefs, setSelectedRefs] = useState([]);
     const [isGenerating, setIsGenerating] = useState(false);
     const [result, setResult] = useState(null);
-    const [engine, setEngine] = useState('flash');
-    const [genMode, setGenMode] = useState('storyboard');
+    const [genMode, setGenMode] = useState(mergedDefaults.genMode === 'full' ? 'storyboard' : mergedDefaults.genMode);
     const [panelImages, setPanelImages] = useState({});
     const [drawingPanels, setDrawingPanels] = useState({});
     const [isAssembling, setIsAssembling] = useState(false);
-    const [colorMode, setColorMode] = useState('bw');
-    const [textDensity, setTextDensity] = useState('dialog_fx');
-    // Storybook-specific settings
-    const [aspectRatio, setAspectRatio] = useState('portrait');
-    const [artStyle, setArtStyle] = useState('storybook_classic');
-    // Editor State
+    const [colorMode, setColorMode] = useState(mergedDefaults.colorMode);
+    const [textDensity, setTextDensity] = useState(mergedDefaults.textDensity);
+    const [aspectRatio, setAspectRatio] = useState(mergedDefaults.aspectRatio);
+    const [artStyle, setArtStyle] = useState(mergedDefaults.artStyle);
     const [isEditorOpen, setIsEditorOpen] = useState(false);
     const [editingImage, setEditingImage] = useState(null);
     const [editingPanelIndex, setEditingPanelIndex] = useState(null);
-    // Upload refs
     const mainUploadRef = useRef(null);
     const panelUploadRefs = useRef({});
-    // Track which planner page this is linked to (for syncing back)
     const [linkedPageIndex, setLinkedPageIndex] = useState(null);
-    // Layout selection state
     const [selectedLayout, setSelectedLayout] = useState(null);
-    const [panelPositions, setPanelPositions] = useState({}); // {panelIndex: {offsetX: 0, offsetY: 0, scale: 1}}
+    const [panelPositions, setPanelPositions] = useState({});
     const [isLayoutSelectorOpen, setIsLayoutSelectorOpen] = useState(false);
     const [gutterColor, setGutterColor] = useState('#000000');
     const [gutterWidth, setGutterWidth] = useState(4);
     const [showLayoutPreview, setShowLayoutPreview] = useState(false);
-    // Konva stage ref + sizing for WYSIWYG export
     const layoutStageRef = useRef(null);
     const [layoutStageSize, setLayoutStageSize] = useState({ width: 0, height: 0 });
     const [hasMigratedOffsetsToKonva, setHasMigratedOffsetsToKonva] = useState(false);
-    // Per-panel settings: {panelIndex: {engine, colorMode, aspectRatio}}
     const [panelSettings, setPanelSettings] = useState({});
-    // Assembly confirmation state
     const [assembledPreview, setAssembledPreview] = useState(null);
     const [showAssemblyConfirm, setShowAssemblyConfirm] = useState(false);
+    const [statusMessage, setStatusMessage] = useState('');
+    const [statusTone, setStatusTone] = useState('error');
+    const [allowIncompleteAssembly, setAllowIncompleteAssembly] = useState(false);
 
-    // Handle incoming data from Story Planner
     useEffect(() => {
         if (initialData) {
+            const incomingSettings = initialData.generationSettings || {};
+            const matchedUrls = [];
+
             setStory(initialData.pageContent || '');
             setPanels(initialData.panelCount || 3);
+            setLinkedPageIndex(initialData.pageIndex !== undefined ? initialData.pageIndex : null);
+            setResult(initialData.generatedResult || initialData.generatedAsset || null);
+            setPanelImages({});
+            setPanelSettings({});
+            setSelectedLayout(null);
+            setPanelPositions({});
+            setShowLayoutPreview(false);
+            setShowAssemblyConfirm(false);
+            setAssembledPreview(null);
+            setAllowIncompleteAssembly(false);
+            setHasMigratedOffsetsToKonva(false);
+            setStatusMessage('');
+            setGenMode(incomingSettings.genMode || (mergedDefaults.genMode === 'full' ? 'storyboard' : mergedDefaults.genMode));
+            setColorMode(incomingSettings.colorMode || mergedDefaults.colorMode);
+            setTextDensity(incomingSettings.textDensity || mergedDefaults.textDensity);
+            setAspectRatio(incomingSettings.aspectRatio || mergedDefaults.aspectRatio);
+            setArtStyle(incomingSettings.artStyle || mergedDefaults.artStyle);
 
-            // Store the linked page index for syncing back to planner
-            if (initialData.pageIndex !== undefined) {
-                setLinkedPageIndex(initialData.pageIndex);
-            }
-
-            // Load generated/uploaded image if present
-            if (initialData.generatedResult) {
-                setResult(initialData.generatedResult);
-                setPanelImages({}); // Clear panel images when loading a full result
-            }
-
-            // Match suggested reference names to local library URLs
             if (initialData.suggestedReferences) {
-                const matchedUrls = [];
-                [...library.characters, ...library.locations, ...library.style].forEach(item => {
-                    if (initialData.suggestedReferences.some(ref => ref.includes(item.name))) {
+                [...library.characters, ...library.locations, ...library.style].forEach((item) => {
+                    const matchTerms = [item.name, item.displayName, item.role].filter(Boolean);
+                    if (initialData.suggestedReferences.some((ref) => matchTerms.some((term) => ref.includes(term)))) {
                         matchedUrls.push(item.url);
                     }
                 });
-                setSelectedRefs(matchedUrls);
             }
 
-            // Clear the shared state after applying to local state
-            if (onClearInitialData) onClearInitialData();
+            setSelectedRefs(matchedUrls);
         }
-    }, [initialData, library, onClearInitialData]);
+    }, [initialData, library, aiDefaults]);
+
+    useEffect(() => {
+        if (initialData) {
+            return;
+        }
+
+        setGenMode(mergedDefaults.genMode === 'full' ? 'storyboard' : mergedDefaults.genMode);
+        setColorMode(mergedDefaults.colorMode);
+        setTextDensity(mergedDefaults.textDensity);
+        setAspectRatio(mergedDefaults.aspectRatio);
+        setArtStyle(mergedDefaults.artStyle);
+    }, [aiDefaults]);
 
     const toggleReference = (url) => {
         if (selectedRefs.includes(url)) {
-            setSelectedRefs(selectedRefs.filter(r => r !== url));
+            setSelectedRefs(selectedRefs.filter((reference) => reference !== url));
         } else {
             setSelectedRefs([...selectedRefs, url]);
         }
     };
 
-    // Sync result back to Story Planner if this page came from there
-    const syncToPlanner = (newResult) => {
-        if (linkedPageIndex !== null && onSyncToPlanner) {
-            onSyncToPlanner(linkedPageIndex, newResult);
+    const setStatus = (message, tone = 'error', title = null) => {
+        setStatusMessage(message);
+        setStatusTone(tone);
+        if (title) {
+            onNotify?.({ message, title, type: tone === 'warning' ? 'error' : tone });
         }
     };
 
+    const buildCurrentPagePatch = (overrides = {}) => ({
+        pageContent: overrides.pageContent ?? story,
+        panelCount: overrides.panelCount ?? panels,
+        generationSettings: {
+            genMode,
+            colorMode,
+            textDensity,
+            aspectRatio,
+            artStyle,
+            ...(overrides.generationSettings || {}),
+        },
+    });
+
+    const syncToPlanner = async ({ imageResult = null, pagePatch = buildCurrentPagePatch() } = {}) => {
+        if (linkedPageIndex === null || !onSyncToPlanner) {
+            return null;
+        }
+
+        if (imageResult && !isInlineImageResult(imageResult) && !isPersistedAsset(imageResult)) {
+            return null;
+        }
+
+        try {
+            return await onSyncToPlanner(linkedPageIndex, { imageResult, pagePatch });
+        } catch (error) {
+            setStatus(error.message, 'error', 'Planner Sync Failed');
+            return null;
+        }
+    };
+
+    const syncLinkedDraft = async (overrides = {}) => (
+        syncToPlanner({ pagePatch: buildCurrentPagePatch(overrides) })
+    );
+
+    const handleStoryBlur = async () => {
+        await syncLinkedDraft({ pageContent: story });
+    };
+
+    const handlePanelsChange = async (value) => {
+        setPanels(value);
+        await syncLinkedDraft({ panelCount: value });
+    };
+
+    const handleGenerationSettingChange = async (field, value) => {
+        const setters = {
+            genMode: setGenMode,
+            colorMode: setColorMode,
+            textDensity: setTextDensity,
+            aspectRatio: setAspectRatio,
+            artStyle: setArtStyle,
+        };
+
+        setters[field]?.(value);
+        await syncLinkedDraft({ generationSettings: { [field]: value } });
+    };
+
+    const loadSelectedReferenceImages = async () => Promise.all(
+        selectedRefs.map(async (url) => ({
+            name: url.split('/').pop(),
+            data: await fetchAssetAsDataUrl(url),
+        }))
+    );
+
     const handleGenerate = async () => {
-        if (!story.trim()) return alert('Please enter a story snippet');
+        if (!story.trim()) {
+            setStatus('Please enter a story snippet.');
+            return;
+        }
 
         setIsGenerating(true);
         setResult(null);
+        setStatusMessage('');
 
         try {
-            const referenceImages = await Promise.all(
-                selectedRefs.map(async (url) => {
-                    const response = await fetch(url);
-                    const blob = await response.blob();
-                    const filename = url.split('/').pop();
-
-                    return new Promise((resolve) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => resolve({
-                            name: filename,
-                            data: reader.result
-                        });
-                        reader.readAsDataURL(blob);
-                    });
-                })
-            );
-
-            const res = await fetch('/api/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    prompt: story,
-                    references: referenceImages,
-                    panels,
-                    mode: genMode,
-                    engine,
-                    projectId,
-                    colorMode,
-                    textDensity,
-                    appMode,
-                    aspectRatio,
-                    artStyle
-                })
+            await syncLinkedDraft();
+            const referenceImages = await loadSelectedReferenceImages();
+            const data = await requestGeneratePage({
+                prompt: story,
+                references: referenceImages,
+                panels,
+                mode: genMode,
+                projectId,
+                colorMode,
+                textDensity,
+                appMode,
+                aspectRatio,
+                artStyle,
             });
 
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-
-            if (onUsageUpdate) onUsageUpdate(engine, data.usage, genMode === 'full' || genMode === 'storybook' || appMode === 'storybook');
+            if (onUsageUpdate) onUsageUpdate(data.route, data.usage);
 
             setResult(data.result);
-            setPanelImages({}); // Clear previous manual panels
-            onRefresh();
-            
-            // Sync back to Story Planner if linked
-            syncToPlanner(data.result);
-        } catch (err) {
-            alert('Generation failed: ' + err.message);
+            setPanelImages({});
+            setAllowIncompleteAssembly(false);
+
+            if (data.result?.type === 'image') {
+                await syncToPlanner({ imageResult: data.result, pagePatch: buildCurrentPagePatch() });
+            } else {
+                await syncLinkedDraft();
+            }
+        } catch (error) {
+            setStatus(error.message, 'error', 'Generation Failed');
         } finally {
             setIsGenerating(false);
         }
     };
 
-    // Update per-panel settings
     const updatePanelSetting = (panelIndex, setting, value) => {
-        setPanelSettings(prev => ({
+        setPanelSettings((prev) => ({
             ...prev,
             [panelIndex]: {
                 ...prev[panelIndex],
-                [setting]: value
-            }
+                [setting]: value,
+            },
         }));
     };
 
-    // Get effective setting for a panel (per-panel overrides global)
     const getPanelSetting = (panelIndex, setting) => {
         const panelSetting = panelSettings[panelIndex]?.[setting];
         if (panelSetting !== undefined) return panelSetting;
-        // Fall back to global settings
         switch (setting) {
-            case 'engine': return engine;
             case 'colorMode': return colorMode;
             case 'aspectRatio': return aspectRatio;
             default: return null;
@@ -179,54 +253,34 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
     };
 
     const handleDrawPanel = async (panelIndex, panelData) => {
-        setDrawingPanels(prev => ({ ...prev, [panelIndex]: true }));
+        setDrawingPanels((prev) => ({ ...prev, [panelIndex]: true }));
+        setStatusMessage('');
         try {
-            const referenceImages = await Promise.all(
-                selectedRefs.map(async (url) => {
-                    const response = await fetch(url);
-                    const blob = await response.blob();
-                    const filename = url.split('/').pop();
-                    return new Promise((resolve) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => resolve({ name: filename, data: reader.result });
-                        reader.readAsDataURL(blob);
-                    });
-                })
-            );
-
-            // Use per-panel settings if available, otherwise fall back to global
-            const panelEngine = getPanelSetting(panelIndex, 'engine');
+            const referenceImages = await loadSelectedReferenceImages();
             const panelColorMode = getPanelSetting(panelIndex, 'colorMode');
             const panelAspectRatio = getPanelSetting(panelIndex, 'aspectRatio');
 
-            const res = await fetch('/api/generate-panel', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    panel: panelData,
-                    references: referenceImages,
-                    engine: panelEngine,
-                    projectId,
-                    colorMode: panelColorMode,
-                    textDensity,
-                    aspectRatio: panelAspectRatio
-                })
+            const data = await requestGeneratePanel({
+                panel: panelData,
+                references: referenceImages,
+                projectId,
+                colorMode: panelColorMode,
+                textDensity,
+                aspectRatio: panelAspectRatio,
             });
 
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-
-            if (onUsageUpdate) onUsageUpdate(panelEngine, data.usage, true); // Drawing art is always image generation
+            if (onUsageUpdate) onUsageUpdate(data.route, data.usage);
 
             if (data.result && data.result.type === 'image') {
-                setPanelImages(prev => ({ ...prev, [panelIndex]: data.result }));
+                setPanelImages((prev) => ({ ...prev, [panelIndex]: data.result }));
+                setAllowIncompleteAssembly(false);
             } else {
-                alert('Panel generation did not return an image.');
+                setStatus('Panel generation did not return an image.', 'error', 'Panel Generation Failed');
             }
-        } catch (err) {
-            alert('Panel generation failed: ' + err.message);
+        } catch (error) {
+            setStatus(error.message, 'error', 'Panel Generation Failed');
         } finally {
-            setDrawingPanels(prev => ({ ...prev, [panelIndex]: false }));
+            setDrawingPanels((prev) => ({ ...prev, [panelIndex]: false }));
         }
     };
 
@@ -236,152 +290,134 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
         const drawnPanelsCount = Object.keys(panelImages).length;
 
         if (!selectedLayout) {
-            alert('Please select a layout first.');
+            setStatus('Please select a layout first.');
             return;
         }
 
         if (!layoutStageRef.current || !layoutStageSize.width) {
-            alert('Please open Layout Preview mode first to assemble the page.');
+            setStatus('Open Layout Preview mode first to assemble the page.');
             return;
         }
 
-        if (drawnPanelsCount < panelsCount) {
-            if (!confirm(`You have only drawn ${drawnPanelsCount} out of ${panelsCount} panels. Assemble anyway?`)) return;
+        if (drawnPanelsCount < panelsCount && !allowIncompleteAssembly) {
+            setAllowIncompleteAssembly(true);
+            setStatus(`Only ${drawnPanelsCount} of ${panelsCount} panels are ready. Click assemble again to continue anyway.`, 'warning');
+            return;
         }
 
+        setAllowIncompleteAssembly(false);
         setIsAssembling(true);
         try {
-            // WYSIWYG export: the Konva stage is the single source of truth.
-            // Export to EXACT 800x1200 regardless of preview size.
             const pixelRatio = 800 / layoutStageSize.width;
-            
-            // Hide panel numbers before export (they're for editing guidance only)
             const panelNumbers = layoutStageRef.current.find('.panelNumber');
-            panelNumbers.forEach(node => node.hide());
-            
+            panelNumbers.forEach((node) => node.hide());
             const assembledData = layoutStageRef.current.toDataURL({ pixelRatio });
-            
-            // Show panel numbers again for continued editing
-            panelNumbers.forEach(node => node.show());
-            
-            // Show confirmation modal instead of immediately finalizing
+            panelNumbers.forEach((node) => node.show());
             setAssembledPreview(assembledData);
             setShowAssemblyConfirm(true);
-        } catch (err) {
-            console.error('Assembly failed:', err);
-            alert('Assembly failed: ' + err.message);
+            setStatusMessage('');
+        } catch (error) {
+            console.error('Assembly failed:', error);
+            setStatus(error.message, 'error', 'Assembly Failed');
         } finally {
             setIsAssembling(false);
         }
     };
 
-    // Accept the assembled page
-    const handleAcceptAssembly = () => {
+    const handleAcceptAssembly = async () => {
         if (!assembledPreview) return;
-        
+
         const assembledResult = {
             type: 'image',
             data: assembledPreview.split(',')[1],
-            mimeType: 'image/png'
+            mimeType: 'image/png',
         };
-        
+
         setResult(assembledResult);
         setShowLayoutPreview(false);
         setShowAssemblyConfirm(false);
         setAssembledPreview(null);
-        syncToPlanner(assembledResult);
+        await syncToPlanner({ imageResult: assembledResult, pagePatch: buildCurrentPagePatch() });
     };
 
-    // Reject the assembled page and go back to editing
     const handleRejectAssembly = () => {
         setShowAssemblyConfirm(false);
         setAssembledPreview(null);
-        // Stay in preview mode so user can adjust
+    };
+
+    const saveImageToLibrary = async (filename, imageSource) => {
+        if (!imageSource) {
+            setStatus('Only image outputs can be saved.');
+            return;
+        }
+
+        try {
+            const { dataUrl } = await inlineImageToSavePayload(imageSource);
+            await saveAsset({
+                bucket: 'pages',
+                filename,
+                imageData: dataUrl,
+                projectId,
+            });
+            setStatus(`Saved ${filename} to the project library.`, 'success');
+            onNotify?.({ message: `${filename} saved.`, title: 'Asset Saved', type: 'success' });
+            await onRefresh?.();
+        } catch (error) {
+            setStatus(error.message, 'error', 'Save Failed');
+        }
     };
 
     const handleSavePage = async () => {
         if (!result) return;
-        saveImageToLibrary(`page_${Date.now()}.png`, result.type === 'image' ? `data:${result.mimeType};base64,${result.data}` : null);
+        await saveImageToLibrary(`page_${Date.now()}.png`, result);
     };
 
     const handleSavePanel = async (index) => {
-        const p = panelImages[index];
-        if (!p) return;
-        saveImageToLibrary(`panel_${index}_${Date.now()}.png`, `data:${p.mimeType};base64,${p.data}`);
+        const panelImage = panelImages[index];
+        if (!panelImage) return;
+        await saveImageToLibrary(`panel_${index}_${Date.now()}.png`, panelImage);
     };
 
-    const saveImageToLibrary = async (filename, imageData) => {
-        if (!imageData) {
-            // Simulated fallback for JSON-only results
-            imageData = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
-        }
-
-        try {
-            const res = await fetch('/api/save', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    filename,
-                    imageData,
-                    projectId
-                })
-            });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-            alert('Saved to project library!');
-            onRefresh();
-        } catch (err) {
-            alert('Save failed: ' + err.message);
-        }
-    };
-
-    // Upload handlers for replacing generated images with uploaded ones
-    const handleMainImageUpload = (e) => {
-        const file = e.target.files[0];
+    const handleMainImageUpload = (event) => {
+        const file = event.target.files[0];
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = (event) => {
-            const dataUrl = event.target.result;
-            const base64Data = dataUrl.split(',')[1];
-            const mimeType = file.type || 'image/png';
-
+        reader.onload = async (loadEvent) => {
+            const dataUrl = loadEvent.target.result;
             const uploadedResult = {
                 type: 'image',
-                data: base64Data,
-                mimeType: mimeType
+                data: dataUrl.split(',')[1],
+                mimeType: file.type || 'image/png',
             };
             setResult(uploadedResult);
-            setPanelImages({}); // Clear panel images when uploading a full page
-            
-            // Sync back to Story Planner if linked
-            syncToPlanner(uploadedResult);
+            setPanelImages({});
+            setAllowIncompleteAssembly(false);
+            await syncToPlanner({ imageResult: uploadedResult, pagePatch: buildCurrentPagePatch() });
         };
         reader.readAsDataURL(file);
-        e.target.value = ''; // Reset input
+        event.target.value = '';
     };
 
-    const handlePanelImageUpload = (panelIndex, e) => {
-        const file = e.target.files[0];
+    const handlePanelImageUpload = (panelIndex, event) => {
+        const file = event.target.files[0];
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = (event) => {
-            const dataUrl = event.target.result;
-            const base64Data = dataUrl.split(',')[1];
-            const mimeType = file.type || 'image/png';
-
-            setPanelImages(prev => ({
+        reader.onload = (loadEvent) => {
+            const dataUrl = loadEvent.target.result;
+            setPanelImages((prev) => ({
                 ...prev,
                 [panelIndex]: {
                     type: 'image',
-                    data: base64Data,
-                    mimeType: mimeType
-                }
+                    data: dataUrl.split(',')[1],
+                    mimeType: file.type || 'image/png',
+                },
             }));
+            setAllowIncompleteAssembly(false);
         };
         reader.readAsDataURL(file);
-        e.target.value = ''; // Reset input
+        event.target.value = '';
     };
 
     // Handle scale change for a panel
@@ -396,7 +432,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
             }
         }));
     };
-    
+
     // If the user has offsets from the legacy CSS preview, convert them once into Konva's
     // canonical coordinate space (800x1200) when we know the preview stage size.
     useEffect(() => {
@@ -430,37 +466,22 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
     }, [showLayoutPreview, hasMigratedOffsetsToKonva, layoutStageSize.width, panelPositions, setPanelPositions]);
 
     // Helper to parse result (handles both string JSON and object)
-    const getParsedResult = () => {
-        if (!result) return null;
-        if (typeof result === 'string') {
-            try {
-                let textToParse = result.trim();
-                if (textToParse.startsWith('```')) {
-                    textToParse = textToParse.replace(/^```(?:json)?\s*\n?/, '');
-                    textToParse = textToParse.replace(/\n?```\s*$/, '');
-                }
-                return JSON.parse(textToParse);
-            } catch (e) {
-                return null;
-            }
-        }
-        return result;
-    };
+    const getParsedResult = () => parseStoryboardResult(result);
 
     // Render the live layout preview with draggable panels
     const renderLayoutPreview = () => {
         const parsedResult = getParsedResult();
         if (!selectedLayout || !parsedResult?.panels) return null;
-        
+
         const panelsCount = Math.min(parsedResult.panels.length, selectedLayout.panels.length);
-        
+
         return (
             <div className="layout-preview-container">
                 <div className="layout-preview-header">
                     <h4>Layout Preview</h4>
                     <p>Drag panels to reposition, use controls to adjust size</p>
                 </div>
-                
+
                 <div className="layout-preview-controls">
                     <div className="control-group">
                         <label>Divider Color</label>
@@ -508,11 +529,11 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                 <div key={i} className={`panel-scale-item ${!hasImage ? 'disabled' : ''}`}>
                                     <span className="panel-scale-label">Panel {i + 1}</span>
                                     <div className="panel-scale-slider">
-                                        <button 
+                                        <button
                                             className="scale-btn"
                                             onClick={() => handlePanelScaleChange(i, Math.max(0.2, currentScale - 0.1))}
                                             disabled={!hasImage}
-                                        >−</button>
+                                        >-</button>
                                         <input
                                             type="range"
                                             min="0.2"
@@ -523,7 +544,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                             disabled={!hasImage}
                                             className="scale-range"
                                         />
-                                        <button 
+                                        <button
                                             className="scale-btn"
                                             onClick={() => handlePanelScaleChange(i, Math.min(2, currentScale + 0.1))}
                                             disabled={!hasImage}
@@ -535,7 +556,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                         })}
                     </div>
                 </div>
-                
+
                 <LayoutPreviewKonva
                     selectedLayout={selectedLayout}
                     panelsCount={panelsCount}
@@ -547,7 +568,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                     stageRef={layoutStageRef}
                     onStageSizeChange={setLayoutStageSize}
                 />
-                
+
                 <div className="layout-preview-actions">
                     <button
                         className="btn-secondary"
@@ -570,16 +591,17 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
     const renderResult = () => {
         if (!result) return null;
 
-        if (result.type === 'image') {
+        const imageSrc = getDisplayImageSrc(result);
+        if (imageSrc) {
             return (
                 <div className="preview-content animate-in">
                     <div className="storyboard-header">
                         <div>
                             <h3 className="heading-font" style={{ color: 'var(--accent)', fontSize: '1.4rem' }}>
-                                {genMode === 'storybook' ? 'Generated Illustration' : 'Generated Manga Page'}
+                                {appMode === 'storybook' ? 'Generated Illustration' : 'Generated Manga Page'}
                             </h3>
                             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '4px' }}>
-                                High-fidelity art by Nano Banana Pro
+                                Generated with the configured image route
                             </p>
                         </div>
                         <button className="tab-btn" onClick={handleSavePage} style={{ background: 'var(--accent)', color: 'white', border: 'none' }}>
@@ -588,15 +610,15 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                     </div>
                     <div className="full-page-preview image-hover-container">
                         <img
-                            src={`data:${result.mimeType};base64,${result.data}`}
+                            src={imageSrc}
                             alt="Generated Manga Page"
                             style={{ width: '100%', borderRadius: 'var(--radius-md)', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' }}
                         />
                         <div className="image-overlay-actions">
                             <button className="action-pill save" onClick={handleSavePage}>Save</button>
                             <button className="action-pill edit" onClick={() => {
-                                setEditingImage(`data:${result.mimeType};base64,${result.data}`);
-                                setEditingPanelIndex(-1); // -1 for full page
+                                setEditingImage(imageSrc);
+                                setEditingPanelIndex(-1);
                                 setIsEditorOpen(true);
                             }}>Edit</button>
                             <button className="action-pill regen" onClick={handleGenerate}>Regenerate</button>
@@ -607,19 +629,9 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
             );
         }
 
-        let data = result;
-        if (typeof result === 'string') {
-            try {
-                // Strip markdown code blocks if present (```json ... ``` or ``` ... ```)
-                let textToParse = result.trim();
-                if (textToParse.startsWith('```')) {
-                    textToParse = textToParse.replace(/^```(?:json)?\s*\n?/, '');
-                    textToParse = textToParse.replace(/\n?```\s*$/, '');
-                }
-                data = JSON.parse(textToParse);
-            } catch (e) {
-                return <div className="ai-output-box">{result}</div>;
-            }
+        const data = parseStoryboardResult(result);
+        if (!data) {
+            return <div className="ai-output-box">{typeof result === 'string' ? result : JSON.stringify(result, null, 2)}</div>;
         }
 
         if (data && data.panels) {
@@ -631,7 +643,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                 {data.title || 'Manga Storyboard Blueprint'}
                             </h3>
                             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '4px' }}>
-                                {data.summary || 'Generated narrative blueprint by Nano Banana'}
+                                {data.summary || 'Generated narrative blueprint'}
                             </p>
                         </div>
                         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
@@ -646,13 +658,13 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                 <button
                                     className={`tab-btn ${showLayoutPreview ? 'active' : ''}`}
                                     onClick={() => setShowLayoutPreview(!showLayoutPreview)}
-                                    style={{ 
-                                        background: showLayoutPreview ? 'var(--accent)' : 'var(--bg-tertiary)', 
+                                    style={{
+                                        background: showLayoutPreview ? 'var(--accent)' : 'var(--bg-tertiary)',
                                         color: showLayoutPreview ? 'white' : 'var(--text)',
-                                        border: '1px solid var(--border)' 
+                                        border: '1px solid var(--border)'
                                     }}
                                 >
-                                    {showLayoutPreview ? '✓ Preview Mode' : '👁️ Preview Layout'}
+                                    {showLayoutPreview ? 'Hide Preview' : 'Preview Layout'}
                                 </button>
                             )}
                             {!showLayoutPreview && (
@@ -675,7 +687,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                     {selectedLayout && !showLayoutPreview && (
                         <div className="layout-info-banner">
                             <span>Using <strong>{selectedLayout.name}</strong> layout</span>
-                            <button 
+                            <button
                                 className="layout-change-btn"
                                 onClick={() => setIsLayoutSelectorOpen(true)}
                             >
@@ -693,15 +705,6 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                             <div key={i} className="panel-card animate-in" style={{ animationDelay: `${i * 0.1}s` }}>
                                 {/* Per-panel settings row */}
                                 <div className="panel-settings-row">
-                                    <select
-                                        className="panel-setting-select"
-                                        value={getPanelSetting(i, 'engine')}
-                                        onChange={(e) => updatePanelSetting(i, 'engine', e.target.value)}
-                                        title="Engine"
-                                    >
-                                        <option value="flash">⚡ Flash</option>
-                                        <option value="pro">✨ Pro</option>
-                                    </select>
                                     <select
                                         className="panel-setting-select"
                                         value={getPanelSetting(i, 'colorMode')}
@@ -733,9 +736,9 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                             <img
                                                 src={`data:${panelImages[i].mimeType};base64,${panelImages[i].data}`}
                                                 alt={`Panel ${i + 1}`}
-                                                style={{ 
-                                                    width: '100%', 
-                                                    height: '100%', 
+                                                style={{
+                                                    width: '100%',
+                                                    height: '100%',
                                                     objectFit: 'cover',
                                                     objectPosition: `${50 + (panelPositions[i]?.offsetX || 0) / 5}% ${50 + (panelPositions[i]?.offsetY || 0) / 5}%`
                                                 }}
@@ -753,60 +756,60 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                             {/* Position adjustment controls - shown when layout is selected */}
                                             {selectedLayout && (
                                                 <div className="panel-position-controls">
-                                                    <button 
+                                                    <button
                                                         className="pos-btn up"
                                                         onClick={() => setPanelPositions(prev => ({
                                                             ...prev,
-                                                            [i]: { 
-                                                                offsetX: prev[i]?.offsetX || 0, 
-                                                                offsetY: (prev[i]?.offsetY || 0) - 20 
+                                                            [i]: {
+                                                                offsetX: prev[i]?.offsetX || 0,
+                                                                offsetY: (prev[i]?.offsetY || 0) - 20
                                                             }
                                                         }))}
                                                         title="Move up"
-                                                    >▲</button>
+                                                    >^</button>
                                                     <div className="pos-btn-row">
-                                                        <button 
+                                                        <button
                                                             className="pos-btn left"
                                                             onClick={() => setPanelPositions(prev => ({
                                                                 ...prev,
-                                                                [i]: { 
-                                                                    offsetX: (prev[i]?.offsetX || 0) - 20, 
-                                                                    offsetY: prev[i]?.offsetY || 0 
+                                                                [i]: {
+                                                                    offsetX: (prev[i]?.offsetX || 0) - 20,
+                                                                    offsetY: prev[i]?.offsetY || 0
                                                                 }
                                                             }))}
                                                             title="Move left"
-                                                        >◀</button>
-                                                        <button 
+                                                        >&lt;</button>
+                                                        <button
                                                             className="pos-btn reset"
                                                             onClick={() => setPanelPositions(prev => ({
                                                                 ...prev,
                                                                 [i]: { offsetX: 0, offsetY: 0 }
                                                             }))}
                                                             title="Reset position"
-                                                        >⟲</button>
-                                                        <button 
+                                                        >R</button>
+                                                        <button
                                                             className="pos-btn right"
                                                             onClick={() => setPanelPositions(prev => ({
                                                                 ...prev,
-                                                                [i]: { 
-                                                                    offsetX: (prev[i]?.offsetX || 0) + 20, 
-                                                                    offsetY: prev[i]?.offsetY || 0 
+                                                                [i]: {
+                                                                    offsetX: (prev[i]?.offsetX || 0) + 20,
+                                                                    offsetY: prev[i]?.offsetY || 0
                                                                 }
                                                             }))}
                                                             title="Move right"
-                                                        >▶</button>
+                                                        >&gt;</button>
                                                     </div>
-                                                    <button 
+                                                    <button
                                                         className="pos-btn down"
                                                         onClick={() => setPanelPositions(prev => ({
                                                             ...prev,
-                                                            [i]: { 
-                                                                offsetX: prev[i]?.offsetX || 0, 
-                                                                offsetY: (prev[i]?.offsetY || 0) + 20 
+                                                            [i]: {
+                                                                offsetX: prev[i]?.offsetX || 0,
+                                                                offsetY: (prev[i]?.offsetY || 0) + 20
                                                             }
                                                         }))}
                                                         title="Move down"
-                                                    >▼</button>
+                                                    >v</button>
                                                 </div>
                                             )}
                                             <input
@@ -819,7 +822,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                         </div>
                                     ) : (
                                         <div className="panel-visual-placeholder">
-                                            {drawingPanels[i] ? <div className="loader small"></div> : '✦'}
+                                            {drawingPanels[i] ? <div className="loader small"></div> : '...'}
                                         </div>
                                     )}
 
@@ -837,7 +840,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                                 onClick={() => panelUploadRefs.current[i]?.click()}
                                                 title="Upload image for this panel"
                                             >
-                                                📤
+                                                Upload
                                             </button>
                                             <input
                                                 ref={el => panelUploadRefs.current[i] = el}
@@ -876,19 +879,6 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                         ))}
                     </div>}
 
-                    {!showLayoutPreview && (
-                        <div style={{
-                            marginTop: '30px',
-                            padding: '15px',
-                            background: 'rgba(255,165,0,0.05)',
-                            border: '1px solid rgba(255,165,0,0.2)',
-                            borderRadius: 'var(--radius-md)',
-                            fontSize: '0.8rem',
-                            color: '#ffb347'
-                        }}>
-                            <strong>Nano Banana Note:</strong> This is a **Blueprint Storyboard**. To generate the actual high-fidelity manga page art, switch the <strong>Engine</strong> to <strong>N. Banana Pro</strong> in the sidebar and click Generate Page again.
-                        </div>
-                    )}
                 </div>
             );
         }
@@ -907,6 +897,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                         style={{ height: '220px' }}
                         value={story}
                         onChange={(e) => setStory(e.target.value)}
+                        onBlur={handleStoryBlur}
                     />
                 </div>
 
@@ -923,7 +914,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                                 >
                                     <img src={item.url} alt={item.name} />
                                     {selectedRefs.includes(item.url) && (
-                                        <div className="ref-check">✓</div>
+                                        <div className="ref-check">OK</div>
                                     )}
                                 </div>
                             ))
@@ -942,7 +933,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                         <select
                             className="input-glass"
                             value={genMode}
-                            onChange={(e) => setGenMode(e.target.value)}
+                            onChange={(e) => handleGenerationSettingChange('genMode', e.target.value)}
                         >
                             <option value="storyboard">Storyboard</option>
                             <option value="full">Full Page Generation</option>
@@ -951,23 +942,11 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                 )}
 
                 <div className="field-group">
-                    <label className="field-label">Engine</label>
-                    <select
-                        className="input-glass"
-                        value={engine}
-                        onChange={(e) => setEngine(e.target.value)}
-                    >
-                        <option value="flash">Nano Banana</option>
-                        <option value="pro">Nano Banana Pro</option>
-                    </select>
-                </div>
-
-                <div className="field-group">
                     <label className="field-label">Color Mode</label>
                     <select
                         className="input-glass"
                         value={colorMode}
-                        onChange={(e) => setColorMode(e.target.value)}
+                        onChange={(e) => handleGenerationSettingChange('colorMode', e.target.value)}
                     >
                         <option value="bw">Black & White</option>
                         <option value="color">Full Color</option>
@@ -981,8 +960,8 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                         value={['portrait', 'landscape', 'square', 'cinematic', '3:4'].includes(aspectRatio) ? aspectRatio : 'custom'}
                         onChange={(e) => {
                             const val = e.target.value;
-                            if (val === 'custom') setAspectRatio(''); // Clear for custom input
-                            else setAspectRatio(val);
+                            const nextValue = val === 'custom' ? '' : val;
+                            handleGenerationSettingChange('aspectRatio', nextValue);
                         }}
                     >
                         <option value="portrait">Standard Manga (2:3)</option>
@@ -1000,6 +979,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                             placeholder="e.g. 1024x1024 or 21:9"
                             value={aspectRatio}
                             onChange={(e) => setAspectRatio(e.target.value)}
+                            onBlur={() => syncLinkedDraft({ generationSettings: { aspectRatio } })}
                         />
                     )}
                 </div>
@@ -1012,7 +992,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                             <select
                                 className="input-glass"
                                 value={artStyle}
-                                onChange={(e) => setArtStyle(e.target.value)}
+                                onChange={(e) => handleGenerationSettingChange('artStyle', e.target.value)}
                             >
                                 <option value="storybook_classic">Classic Storybook</option>
                                 <option value="watercolor">Watercolor</option>
@@ -1032,7 +1012,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                             <select
                                 className="input-glass"
                                 value={panels}
-                                onChange={(e) => setPanels(Number(e.target.value))}
+                                onChange={(e) => handlePanelsChange(Number(e.target.value))}
                             >
                                 {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => <option key={n} value={n}>{n} Panels</option>)}
                             </select>
@@ -1043,7 +1023,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                             <select
                                 className="input-glass"
                                 value={textDensity}
-                                onChange={(e) => setTextDensity(e.target.value)}
+                                onChange={(e) => handleGenerationSettingChange('textDensity', e.target.value)}
                             >
                                 <option value="minimal">Minimal (Visual Only)</option>
                                 <option value="dialog">Dialog Only</option>
@@ -1054,6 +1034,8 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                         </div>
                     </>
                 )}
+
+                <StatusMessage message={statusMessage} tone={statusTone} />
 
                 <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
                     <button
@@ -1070,7 +1052,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                         style={{ flex: 0, padding: '0 15px' }}
                         title="Upload an image instead of generating"
                     >
-                        📤 Upload
+                        Upload
                     </button>
                     <input
                         ref={mainUploadRef}
@@ -1085,7 +1067,7 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
             <section className="preview-container">
                 {!result && !isGenerating && (
                     <div className="preview-placeholder">
-                        <div style={{ fontSize: '3rem', opacity: 0.2 }}>✦</div>
+                        <div style={{ fontSize: '3rem', opacity: 0.2 }}>...</div>
                         <p>Awaiting your artistic vision</p>
                     </div>
                 )}
@@ -1104,15 +1086,15 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                 isOpen={isEditorOpen}
                 onClose={() => setIsEditorOpen(false)}
                 imageData={editingImage}
-                engine={engine}
                 projectId={projectId}
-                onSaveEdit={(newImage) => {
+                onNotify={onNotify}
+                onSaveEdit={async (newImage) => {
                     if (editingPanelIndex === -1) {
                         setResult(newImage);
-                        // Sync back to Story Planner if linked (only for main image edits)
-                        syncToPlanner(newImage);
+                        await syncToPlanner({ imageResult: newImage, pagePatch: buildCurrentPagePatch() });
                     } else {
-                        setPanelImages(prev => ({ ...prev, [editingPanelIndex]: newImage }));
+                        setPanelImages((prev) => ({ ...prev, [editingPanelIndex]: newImage }));
+                        setAllowIncompleteAssembly(false);
                     }
                 }}
             />
@@ -1152,8 +1134,8 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                             alignItems: 'center',
                             overflow: 'auto'
                         }}>
-                            <img 
-                                src={assembledPreview} 
+                            <img
+                                src={assembledPreview}
                                 alt="Assembled Page Preview"
                                 style={{
                                     maxWidth: '100%',
@@ -1169,14 +1151,14 @@ const CreatorView = ({ library, onRefresh, initialData, onClearInitialData, proj
                             gap: '12px',
                             justifyContent: 'center'
                         }}>
-                            <button 
+                            <button
                                 className="btn-secondary"
                                 onClick={handleRejectAssembly}
                                 style={{ padding: '12px 24px' }}
                             >
                                 Go Back & Adjust
                             </button>
-                            <button 
+                            <button
                                 className="btn-primary"
                                 onClick={handleAcceptAssembly}
                                 style={{ padding: '12px 24px' }}

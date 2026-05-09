@@ -1,10 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
+import StatusMessage from './ui/StatusMessage';
+import { editImage, getLibrary } from '../lib/api.mjs';
+import { fetchAssetAsDataUrl } from '../lib/assets.mjs';
 
-const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defaultEngine, projectId }) => {
+const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, projectId, onNotify }) => {
     const [prompt, setPrompt] = useState('');
     const [brushSize, setBrushSize] = useState(40);
     const [isProcessing, setIsProcessing] = useState(false);
-    const [selectedEngine, setSelectedEngine] = useState(defaultEngine || 'pro');
     const canvasRef = useRef(null);
     const maskCanvasRef = useRef(null);
     const containerRef = useRef(null);
@@ -22,37 +24,33 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
     const [highlightOpacity, setHighlightOpacity] = useState(0.5);
     // Optional location description for fallback
     const [locationHint, setLocationHint] = useState('');
-    
+
     // Asset insertion feature
     const [availableAssets, setAvailableAssets] = useState([]);
     const [selectedAssets, setSelectedAssets] = useState([]); // Now supports multiple
     const [editMode, setEditMode] = useState('edit'); // 'edit' or 'insert'
     const [showAssetPicker, setShowAssetPicker] = useState(false);
-    
+
     // Review step - shows before/after before accepting
     const [pendingResult, setPendingResult] = useState(null); // {data, mimeType}
     const [showReview, setShowReview] = useState(false);
-
-    // Update selected engine when prop changes
-    useEffect(() => {
-        if (defaultEngine) {
-            setSelectedEngine(defaultEngine);
-        }
-    }, [defaultEngine]);
+    const [statusMessage, setStatusMessage] = useState('');
 
     // Fetch available assets when modal opens
     useEffect(() => {
         if (isOpen && projectId) {
-            fetch(`/api/library?projectId=${projectId}`)
-                .then(res => res.json())
-                .then(data => {
-                    // Combine characters from the library
+            getLibrary(projectId)
+                .then((data) => {
                     const characters = data.characters || [];
                     setAvailableAssets(characters);
                 })
-                .catch(err => console.error('Failed to load assets:', err));
+                .catch((err) => {
+                    console.error('Failed to load assets:', err);
+                    setStatusMessage(err.message);
+                    onNotify?.({ message: err.message, title: 'Asset Load Failed', type: 'error' });
+                });
         }
-    }, [isOpen, projectId]);
+    }, [isOpen, onNotify, projectId]);
 
     // Toggle asset selection (for multi-select)
     const toggleAssetSelection = (asset) => {
@@ -88,10 +86,10 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                 // Calculate display size to fit in modal
                 const maxWidth = window.innerWidth * 0.5;
                 const maxHeight = window.innerHeight * 0.6;
-                
+
                 const scale = Math.min(maxWidth / origWidth, maxHeight / origHeight, 1);
                 setDisplayScale(scale);
-                
+
                 const displayWidth = origWidth * scale;
                 const displayHeight = origHeight * scale;
 
@@ -113,19 +111,19 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
     const getCoords = (e) => {
         const canvas = maskCanvasRef.current;
         const rect = canvas.getBoundingClientRect();
-        
+
         // Get mouse position relative to canvas element (CSS display coordinates)
         const cssX = (e.clientX || e.touches[0].clientX) - rect.left;
         const cssY = (e.clientY || e.touches[0].clientY) - rect.top;
-        
+
         // Scale from CSS display size to canvas internal size
         // This is critical when CSS scales the canvas differently from its internal dimensions
         const scaleX = canvas.width / rect.width;
         const scaleY = canvas.height / rect.height;
-        
-        return { 
-            x: cssX * scaleX, 
-            y: cssY * scaleY 
+
+        return {
+            x: cssX * scaleX,
+            y: cssY * scaleY
         };
     };
 
@@ -172,12 +170,12 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
 
         // Draw the mask strokes (transparent background + semi-transparent white strokes)
         dCtx.drawImage(maskCanvasRef.current, 0, 0);
-        
+
         // Convert semi-transparent strokes to solid white
         dCtx.globalCompositeOperation = 'source-in';
         dCtx.fillStyle = 'white';
         dCtx.fillRect(0, 0, displayCanvas.width, displayCanvas.height);
-        
+
         // Add black background behind the white strokes
         dCtx.globalCompositeOperation = 'destination-over';
         dCtx.fillStyle = 'black';
@@ -188,7 +186,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
         finalMaskCanvas.width = originalDimensions.width;
         finalMaskCanvas.height = originalDimensions.height;
         const fCtx = finalMaskCanvas.getContext('2d');
-        
+
         // Use nearest-neighbor scaling to keep mask edges sharp
         fCtx.imageSmoothingEnabled = false;
         fCtx.drawImage(displayCanvas, 0, 0, originalDimensions.width, originalDimensions.height);
@@ -210,21 +208,21 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
         maskScaleCanvas.width = originalDimensions.width;
         maskScaleCanvas.height = originalDimensions.height;
         const mCtx = maskScaleCanvas.getContext('2d');
-        
+
         mCtx.drawImage(
-            maskCanvasRef.current, 
-            0, 0, 
-            originalDimensions.width, 
+            maskCanvasRef.current,
+            0, 0,
+            originalDimensions.width,
             originalDimensions.height
         );
-        
+
         const imageData = mCtx.getImageData(0, 0, maskScaleCanvas.width, maskScaleCanvas.height);
         const data = imageData.data;
-        
+
         let minX = maskScaleCanvas.width, minY = maskScaleCanvas.height;
         let maxX = 0, maxY = 0;
         let hasContent = false;
-        
+
         for (let y = 0; y < maskScaleCanvas.height; y++) {
             for (let x = 0; x < maskScaleCanvas.width; x++) {
                 const i = (y * maskScaleCanvas.width + x) * 4;
@@ -238,9 +236,9 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                 }
             }
         }
-        
+
         if (!hasContent) return null;
-        
+
         return {
             x: minX,
             y: minY,
@@ -282,12 +280,12 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                     maskScaleCanvas.width = originalDimensions.width;
                     maskScaleCanvas.height = originalDimensions.height;
                     const mCtx = maskScaleCanvas.getContext('2d');
-                    
+
                     // Scale the display-size mask to original dimensions
                     mCtx.drawImage(
-                        maskCanvasRef.current, 
-                        0, 0, 
-                        originalDimensions.width, 
+                        maskCanvasRef.current,
+                        0, 0,
+                        originalDimensions.width,
                         originalDimensions.height
                     );
 
@@ -296,10 +294,10 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                     tempCanvas.width = originalDimensions.width;
                     tempCanvas.height = originalDimensions.height;
                     const tCtx = tempCanvas.getContext('2d');
-                    
+
                     // Draw scaled mask
                     tCtx.drawImage(maskScaleCanvas, 0, 0);
-                    
+
                     // Convert any painted area to solid color using source-in
                     tCtx.globalCompositeOperation = 'source-in';
                     tCtx.fillStyle = hexToRgba(highlightColor, highlightOpacity);
@@ -325,23 +323,23 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
 
                             Promise.all(loadPromises).then(loadedAssets => {
                                 const validAssets = loadedAssets.filter(a => a !== null);
-                                
+
                                 if (validAssets.length > 0) {
                                     // Calculate layout for multiple characters
                                     const numAssets = validAssets.length;
                                     const slotWidth = bounds.width / numAssets;
-                                    
+
                                     validAssets.forEach((assetData, idx) => {
                                         const { img: assetImg, name } = assetData;
-                                        
+
                                         // Calculate position for this character
                                         const slotX = bounds.x + (idx * slotWidth);
                                         const slotCenterX = slotX + slotWidth / 2;
-                                        
+
                                         // Scale asset to fit within the slot
                                         const assetAspect = assetImg.width / assetImg.height;
                                         const slotAspect = slotWidth / bounds.height;
-                                        
+
                                         let drawWidth, drawHeight;
                                         if (assetAspect > slotAspect) {
                                             drawWidth = slotWidth * 0.9; // 90% of slot width
@@ -350,10 +348,10 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                             drawHeight = bounds.height * 0.9;
                                             drawWidth = drawHeight * assetAspect;
                                         }
-                                        
+
                                         const drawX = slotCenterX - drawWidth / 2;
                                         const drawY = bounds.centerY - drawHeight / 2;
-                                        
+
                                         // Draw a border around where the asset will be placed
                                         const colors = ['rgba(0, 255, 255, 0.8)', 'rgba(255, 255, 0, 0.8)', 'rgba(0, 255, 0, 0.8)', 'rgba(255, 128, 0, 0.8)'];
                                         ctx.strokeStyle = colors[idx % colors.length];
@@ -361,12 +359,12 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                         ctx.setLineDash([10, 5]);
                                         ctx.strokeRect(drawX, drawY, drawWidth, drawHeight);
                                         ctx.setLineDash([]);
-                                        
+
                                         // Draw the asset with some transparency
                                         ctx.globalAlpha = 0.6;
                                         ctx.drawImage(assetImg, drawX, drawY, drawWidth, drawHeight);
                                         ctx.globalAlpha = 1.0;
-                                        
+
                                         // Draw character name label
                                         const charName = name.replace(/\.[^.]+$/, '');
                                         ctx.font = 'bold 16px Arial';
@@ -377,7 +375,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                         ctx.fillText(charName, drawX + 5, drawY + 20);
                                     });
                                 }
-                                
+
                                 const result = canvas.toDataURL('image/png');
                                 console.log('Composite with', validAssets.length, 'assets generated');
                                 resolve(result);
@@ -401,26 +399,11 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
     };
 
     // Load asset as data URL for sending to API
-    const loadAssetAsDataUrl = (url) => {
-        return new Promise((resolve, reject) => {
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = img.width;
-                canvas.height = img.height;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0);
-                resolve(canvas.toDataURL('image/png'));
-            };
-            img.onerror = () => reject(new Error('Failed to load asset'));
-            img.src = url;
-        });
-    };
+    const loadAssetAsDataUrl = fetchAssetAsDataUrl;
 
     // Preview the composite image that will be sent (with highlight and optional asset)
     const handlePreviewComposite = async () => {
-        const includeAsset = editMode === 'insert' && selectedAsset;
+        const includeAsset = editMode === 'insert' && selectedAssets.length > 0;
         const compositeData = await generateCompositeWithHighlight(includeAsset);
         setCompositePreview(compositeData);
         console.log('=== COMPOSITE DEBUG INFO ===');
@@ -431,7 +414,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
     const handlePreviewMask = () => {
         const maskData = generateFinalMask();
         setMaskPreview(maskData);
-        
+
         // Also log debug info
         console.log('=== MASK DEBUG INFO ===');
         console.log('Original image dimensions:', originalDimensions);
@@ -473,20 +456,23 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
 
     const handleGenerate = async () => {
         if (editMode === 'edit' && !prompt.trim()) {
-            return alert('Please enter an edit instruction.');
+            setStatusMessage('Please enter an edit instruction.');
+            return;
         }
         if (editMode === 'insert' && selectedAssets.length === 0) {
-            return alert('Please select at least one character to insert.');
+            setStatusMessage('Please select at least one character to insert.');
+            return;
         }
 
+        setStatusMessage('');
         setIsProcessing(true);
         try {
             let requestBody;
-            
+
             if (editMode === 'insert') {
                 // INSERT MODE: Regenerate scene with characters (no composite needed)
                 console.log('Preparing insert request...');
-                
+
                 // Load all selected asset images to send as references
                 const assetDataUrls = await Promise.all(
                     selectedAssets.map(async (asset) => ({
@@ -494,9 +480,9 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                         dataUrl: await loadAssetAsDataUrl(asset.url)
                     }))
                 );
-                
+
                 const characterNames = assetDataUrls.map(a => a.name).join(', ');
-                
+
                 // Build prompt for scene regeneration
                 let fullPrompt = prompt.trim() || '';
                 if (locationHint.trim()) {
@@ -507,22 +493,21 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                     originalImageData: imageData, // Only send original, no composite
                     assets: assetDataUrls,
                     prompt: fullPrompt,
-                    engine: selectedEngine,
                     projectId,
                     mode: 'insert',
                     imageDimensions: originalDimensions // Send dimensions to match output size
                 };
-                
+
                 console.log('Sending insert request with assets:', characterNames);
             } else {
                 // EDIT MODE: Generate composite image with highlight
                 console.log('Generating composite image for edit...');
                 const compositeImageData = await generateCompositeWithHighlight(false);
-                
+
                 if (!compositeImageData) {
                     throw new Error('Failed to generate composite image');
                 }
-                
+
                 // Regular edit mode
                 let fullPrompt = prompt;
                 if (locationHint.trim()) {
@@ -533,34 +518,28 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                     compositeImageData,
                     originalImageData: imageData,
                     prompt: fullPrompt,
-                    engine: selectedEngine,
                     projectId,
                     mode: 'edit',
                     imageDimensions: originalDimensions // Send dimensions to match output size
                 };
-                
+
                 console.log('Sending edit request');
             }
 
-            const res = await fetch('/api/edit', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(requestBody)
-            });
-
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
+            const data = await editImage(requestBody);
 
             if (data.result && data.result.type === 'image') {
                 // Show review instead of immediately accepting
                 setPendingResult(data.result);
                 setShowReview(true);
             } else {
-                alert('Generation failed to return an image. Response: ' + JSON.stringify(data.result).substring(0, 200));
+                setStatusMessage('Generation did not return an editable image.');
+                onNotify?.({ message: 'Generation did not return an image.', title: 'Edit Failed', type: 'error' });
             }
         } catch (err) {
             console.error('Edit error:', err);
-            alert('Generation failed: ' + err.message);
+            setStatusMessage(err.message);
+            onNotify?.({ message: err.message, title: 'Edit Failed', type: 'error' });
         } finally {
             setIsProcessing(false);
         }
@@ -593,7 +572,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
     // Review View - shows before/after comparison
     if (showReview && pendingResult) {
         const editedImageSrc = `data:${pendingResult.mimeType};base64,${pendingResult.data}`;
-        
+
         return (
             <div className="modal-overlay" onClick={handleCancelReview}>
                 <div className="modal-content image-editor-card animate-in" onClick={e => e.stopPropagation()} style={{ maxWidth: '900px' }}>
@@ -606,98 +585,98 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                         <p style={{ textAlign: 'center', marginBottom: '15px', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
                             Compare the original and edited versions below
                         </p>
-                        
-                        <div style={{ 
-                            display: 'grid', 
-                            gridTemplateColumns: '1fr 1fr', 
+
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: '1fr 1fr',
                             gap: '20px',
                             marginBottom: '20px'
                         }}>
                             {/* Original Image */}
                             <div style={{ textAlign: 'center' }}>
-                                <div style={{ 
-                                    fontSize: '0.85rem', 
-                                    fontWeight: 'bold', 
+                                <div style={{
+                                    fontSize: '0.85rem',
+                                    fontWeight: 'bold',
                                     marginBottom: '10px',
                                     color: 'var(--text-muted)'
                                 }}>
                                     Original
                                 </div>
-                                <div style={{ 
-                                    border: '2px solid var(--border)', 
-                                    borderRadius: '8px', 
+                                <div style={{
+                                    border: '2px solid var(--border)',
+                                    borderRadius: '8px',
                                     overflow: 'hidden',
                                     background: 'rgba(0,0,0,0.2)'
                                 }}>
-                                    <img 
-                                        src={imageData} 
-                                        alt="Original" 
-                                        style={{ 
-                                            width: '100%', 
+                                    <img
+                                        src={imageData}
+                                        alt="Original"
+                                        style={{
+                                            width: '100%',
                                             height: 'auto',
                                             display: 'block'
-                                        }} 
+                                        }}
                                     />
                                 </div>
                             </div>
-                            
+
                             {/* Edited Image */}
                             <div style={{ textAlign: 'center' }}>
-                                <div style={{ 
-                                    fontSize: '0.85rem', 
-                                    fontWeight: 'bold', 
+                                <div style={{
+                                    fontSize: '0.85rem',
+                                    fontWeight: 'bold',
                                     marginBottom: '10px',
                                     color: 'var(--accent)'
                                 }}>
                                     Edited
                                 </div>
-                                <div style={{ 
-                                    border: '2px solid var(--accent)', 
-                                    borderRadius: '8px', 
+                                <div style={{
+                                    border: '2px solid var(--accent)',
+                                    borderRadius: '8px',
                                     overflow: 'hidden',
                                     background: 'rgba(0,0,0,0.2)'
                                 }}>
-                                    <img 
-                                        src={editedImageSrc} 
-                                        alt="Edited" 
-                                        style={{ 
-                                            width: '100%', 
+                                    <img
+                                        src={editedImageSrc}
+                                        alt="Edited"
+                                        style={{
+                                            width: '100%',
                                             height: 'auto',
                                             display: 'block'
-                                        }} 
+                                        }}
                                     />
                                 </div>
                             </div>
                         </div>
 
                         {/* Action Buttons */}
-                        <div style={{ 
-                            display: 'flex', 
-                            gap: '15px', 
+                        <div style={{
+                            display: 'flex',
+                            gap: '15px',
                             justifyContent: 'center',
                             marginTop: '20px'
                         }}>
-                            <button 
+                            <button
                                 className="tab-btn"
                                 onClick={handleRetry}
                                 style={{ padding: '12px 30px', fontSize: '1rem' }}
                             >
-                                🔄 Try Again
+                                Try Again
                             </button>
-                            <button 
+                            <button
                                 className="btn-primary"
                                 onClick={handleAcceptEdit}
                                 style={{ padding: '12px 40px', fontSize: '1rem', margin: 0 }}
                             >
-                                ✓ Accept Changes
+                                Accept Changes
                             </button>
                         </div>
-                        
-                        <p style={{ 
-                            textAlign: 'center', 
-                            marginTop: '15px', 
-                            color: 'var(--text-muted)', 
-                            fontSize: '0.75rem' 
+
+                        <p style={{
+                            textAlign: 'center',
+                            marginTop: '15px',
+                            color: 'var(--text-muted)',
+                            fontSize: '0.75rem'
                         }}>
                             Click "Accept Changes" to apply the edit, or "Try Again" to generate a new version
                         </p>
@@ -714,6 +693,8 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                     <h3 className="heading-font">Edit Image Aspect</h3>
                     <button className="close-btn" onClick={onClose}>&times;</button>
                 </div>
+
+                <StatusMessage message={statusMessage} tone="error" />
 
                 <div className="editor-main">
                     <div className="canvas-container" ref={containerRef}>
@@ -741,14 +722,14 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                     onClick={() => { setEditMode('edit'); setSelectedAssets([]); }}
                                     style={{ flex: 1, margin: 0, padding: '8px' }}
                                 >
-                                    ✏️ Edit Area
+                                    Edit Area
                                 </button>
                                 <button
                                     className={editMode === 'insert' ? 'btn-primary' : 'tab-btn'}
                                     onClick={() => setEditMode('insert')}
                                     style={{ flex: 1, margin: 0, padding: '8px' }}
                                 >
-                                    👤 Insert Character
+                                    Insert Character
                                 </button>
                             </div>
                         </div>
@@ -770,10 +751,10 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                         {/* Insert Mode: Character selector */}
                         {editMode === 'insert' && (
                             <>
-                                <div style={{ 
-                                    padding: '8px 12px', 
-                                    background: 'rgba(var(--accent-rgb), 0.1)', 
-                                    borderRadius: '6px', 
+                                <div style={{
+                                    padding: '8px 12px',
+                                    background: 'rgba(var(--accent-rgb), 0.1)',
+                                    borderRadius: '6px',
                                     marginBottom: '10px',
                                     border: '1px solid rgba(var(--accent-rgb), 0.3)'
                                 }}>
@@ -781,16 +762,16 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                         This will regenerate the scene with your selected characters added, staying as close to the original as possible.
                                     </p>
                                 </div>
-                                
+
                                 <div className="field-group">
                                     <label className="field-label">
                                         Select Characters ({selectedAssets.length} selected)
                                     </label>
-                                    
+
                                     {/* Selected Characters Display */}
                                     {selectedAssets.length > 0 && (
-                                        <div style={{ 
-                                            display: 'flex', 
+                                        <div style={{
+                                            display: 'flex',
                                             flexWrap: 'wrap',
                                             gap: '8px',
                                             padding: '8px',
@@ -799,11 +780,11 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                             marginBottom: '8px'
                                         }}>
                                             {selectedAssets.map((asset, idx) => (
-                                                <div 
+                                                <div
                                                     key={idx}
-                                                    style={{ 
-                                                        display: 'flex', 
-                                                        alignItems: 'center', 
+                                                    style={{
+                                                        display: 'flex',
+                                                        alignItems: 'center',
                                                         gap: '6px',
                                                         padding: '4px 8px',
                                                         background: 'rgba(var(--accent-rgb), 0.2)',
@@ -811,46 +792,46 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                                         border: '1px solid var(--accent)'
                                                     }}
                                                 >
-                                                    <img 
-                                                        src={asset.url} 
+                                                    <img
+                                                        src={asset.url}
                                                         alt={asset.name}
                                                         style={{ width: '24px', height: '24px', objectFit: 'cover', borderRadius: '50%' }}
                                                     />
                                                     <span style={{ fontSize: '0.8rem' }}>{asset.name.replace(/\.[^.]+$/, '')}</span>
-                                                    <button 
+                                                    <button
                                                         onClick={() => toggleAssetSelection(asset)}
-                                                        style={{ 
-                                                            background: 'none', 
-                                                            border: 'none', 
-                                                            color: 'var(--text-muted)', 
+                                                        style={{
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            color: 'var(--text-muted)',
                                                             cursor: 'pointer',
                                                             padding: '0 2px',
                                                             fontSize: '1rem'
                                                         }}
                                                     >
-                                                        ×
+                                                        x
                                                     </button>
                                                 </div>
                                             ))}
                                         </div>
                                     )}
-                                    
-                                    <button 
+
+                                    <button
                                         className="btn-secondary"
                                         onClick={() => setShowAssetPicker(!showAssetPicker)}
                                         style={{ width: '100%' }}
                                     >
-                                        {showAssetPicker ? '▲ Hide Characters' : '👤 Choose Characters...'}
+                                        {showAssetPicker ? 'Hide Characters' : 'Choose Characters...'}
                                     </button>
                                 </div>
 
                                 {/* Character Picker Grid (Multi-select) */}
                                 {showAssetPicker && (
-                                    <div style={{ 
-                                        maxHeight: '180px', 
-                                        overflowY: 'auto', 
-                                        display: 'grid', 
-                                        gridTemplateColumns: 'repeat(4, 1fr)', 
+                                    <div style={{
+                                        maxHeight: '180px',
+                                        overflowY: 'auto',
+                                        display: 'grid',
+                                        gridTemplateColumns: 'repeat(4, 1fr)',
                                         gap: '8px',
                                         padding: '10px',
                                         background: 'rgba(0,0,0,0.3)',
@@ -865,7 +846,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                             availableAssets.map((asset, idx) => {
                                                 const isSelected = selectedAssets.some(a => a.name === asset.name);
                                                 return (
-                                                    <div 
+                                                    <div
                                                         key={idx}
                                                         onClick={() => toggleAssetSelection(asset)}
                                                         style={{
@@ -894,22 +875,22 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                                                 fontWeight: 'bold',
                                                                 zIndex: 1
                                                             }}>
-                                                                ✓
+                                                                OK
                                                             </div>
                                                         )}
-                                                        <img 
-                                                            src={asset.url} 
+                                                        <img
+                                                            src={asset.url}
                                                             alt={asset.name}
-                                                            style={{ 
-                                                                width: '100%', 
-                                                                aspectRatio: '1', 
+                                                            style={{
+                                                                width: '100%',
+                                                                aspectRatio: '1',
                                                                 objectFit: 'cover',
                                                                 opacity: isSelected ? 1 : 0.7
                                                             }}
                                                         />
-                                                        <div style={{ 
-                                                            fontSize: '0.6rem', 
-                                                            padding: '2px 4px', 
+                                                        <div style={{
+                                                            fontSize: '0.6rem',
+                                                            padding: '2px 4px',
                                                             textAlign: 'center',
                                                             whiteSpace: 'nowrap',
                                                             overflow: 'hidden',
@@ -937,18 +918,6 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                 </div>
                             </>
                         )}
-
-                        <div className="field-group">
-                            <label className="field-label">Engine</label>
-                            <select
-                                className="input-glass"
-                                value={selectedEngine}
-                                onChange={e => setSelectedEngine(e.target.value)}
-                            >
-                                <option value="flash">Nano Banana (Fast)</option>
-                                <option value="pro">Nano Banana Pro (Quality)</option>
-                            </select>
-                        </div>
 
                         <div className="field-group">
                             <label className="field-label">Location Hint (optional)</label>
@@ -1006,7 +975,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                                 disabled={isProcessing}
                                 style={{ flex: 2, margin: 0 }}
                             >
-                                {isProcessing ? <span className="btn-loader small"></span> : '✦ Generate Edit'}
+                                {isProcessing ? <span className="btn-loader small"></span> : 'Generate Edit'}
                             </button>
                         </div>
 
@@ -1015,17 +984,17 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                             <div style={{ marginTop: '10px', padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>What AI will see (magenta = edit area)</span>
-                                    <button 
-                                        onClick={() => setCompositePreview(null)} 
+                                    <button
+                                        onClick={() => setCompositePreview(null)}
                                         style={{ fontSize: '0.7rem', padding: '4px 8px', background: 'var(--border)', border: 'none', borderRadius: '4px', color: 'white', cursor: 'pointer' }}
                                     >
                                         Close
                                     </button>
                                 </div>
-                                <img 
-                                    src={compositePreview} 
-                                    alt="Composite preview" 
-                                    style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--border)' }} 
+                                <img
+                                    src={compositePreview}
+                                    alt="Composite preview"
+                                    style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--border)' }}
                                 />
                                 <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '5px' }}>
                                     The magenta highlight shows the AI exactly which area to edit
@@ -1033,10 +1002,10 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                             </div>
                         )}
 
-                        <div className="upload-divider" style={{ 
-                            display: 'flex', 
-                            alignItems: 'center', 
-                            margin: '15px 0 10px', 
+                        <div className="upload-divider" style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            margin: '15px 0 10px',
                             gap: '10px',
                             color: 'var(--text-muted)',
                             fontSize: '0.75rem'
@@ -1051,7 +1020,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                             onClick={() => uploadInputRef.current?.click()}
                             style={{ width: '100%' }}
                         >
-                            📤 Upload Replacement Image
+                            Upload Replacement Image
                         </button>
                         <input
                             ref={uploadInputRef}
@@ -1062,7 +1031,7 @@ const ImageEditorModal = ({ isOpen, onClose, imageData, onSaveEdit, engine: defa
                         />
 
                         <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '10px' }}>
-                            {editMode === 'edit' 
+                            {editMode === 'edit'
                                 ? 'Paint over the area you want to change, then describe the modification.'
                                 : 'This will generate a new version of the scene with the selected characters added. The AI will try to stay as close to the original as possible.'}
                             {' '}Or upload a completely new image to replace the current one.

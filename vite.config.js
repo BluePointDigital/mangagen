@@ -6,7 +6,8 @@ export default defineConfig({
     server: {
         proxy: {
             '/api': 'http://localhost:3001',
-            '/library': 'http://localhost:3001'
+            '/library': 'http://localhost:3001',
+            '/projects': 'http://localhost:3001',
         }
     }
 })

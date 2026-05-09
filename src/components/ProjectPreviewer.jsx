@@ -1,112 +1,27 @@
-import React, { useState } from 'react';
+﻿import React, { useMemo, useState } from 'react';
+import { getDisplayImageSrc } from '../lib/assets.mjs';
+import { extractVerbatimSegments } from '../lib/storySegments.mjs';
 
 const ProjectPreviewer = ({ isOpen, onClose, project, appMode }) => {
     const [currentPage, setCurrentPage] = useState(0);
-    const [textMode, setTextMode] = useState('full'); // 'short', 'full', or 'prompt'
+    const [textMode, setTextMode] = useState('full');
     const pages = project?.plannedPages || [];
 
-
-
-
-    // Helper to get image source from page data
-    const getImageSrc = (page) => {
-        if (page?.generatedResult?.type === 'image') {
-            return `data:${page.generatedResult.mimeType};base64,${page.generatedResult.data}`;
-        }
-        return null;
-    };
-
-    // Helper to extract verbatim text using anchors (fuzzy matching for robustness)
-    const verbatimSegments = React.useMemo(() => {
-        if (!project?.story || !pages.length) return [];
-
-        const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const makeFuzzy = (anchor) => {
-            if (!anchor) return null;
-            const words = anchor.trim().split(/\s+/).filter(w => w.length > 0);
-            if (words.length === 0) return null;
-            return words.map(word => escapeRegExp(word)).join('[^\\w\\s]*\\s+[^\\w\\s]*');
-        };
-
-        const results = [];
-        let currentSearchPos = 0;
-        const fullStory = project.story;
-
-        pages.forEach((page, idx) => {
-            try {
-                const startPattern = makeFuzzy(page?.startAnchor);
-                const endPattern = makeFuzzy(page?.endAnchor);
-
-                if (!startPattern || !endPattern) {
-                    results.push(null);
-                    return;
-                }
-
-                const startRegex = new RegExp(startPattern, 'i');
-                const endRegex = new RegExp(endPattern, 'i');
-
-                // Search for start anchor from current position onwards
-                const startSlice = fullStory.slice(currentSearchPos);
-                const startMatch = startSlice.match(startRegex);
-
-                if (!startMatch) {
-                    // Fallback: try searching the whole story if sequential search fails
-                    const globalStartMatch = fullStory.match(startRegex);
-                    if (!globalStartMatch) {
-                        results.push(null);
-                        return;
-                    }
-                    // If global found, we'll use that but warns it might be out of order
-                    const globalStartIdx = globalStartMatch.index;
-                    const searchSlice = fullStory.slice(globalStartIdx);
-                    const endMatch = searchSlice.match(endRegex);
-
-                    if (!endMatch) {
-                        results.push(null);
-                        return;
-                    }
-                    const text = fullStory.substring(globalStartIdx, globalStartIdx + endMatch.index + endMatch[0].length).trim();
-                    results.push(text);
-                    currentSearchPos = globalStartIdx + endMatch.index + endMatch[0].length;
-                    return;
-                }
-
-                const startIdx = currentSearchPos + startMatch.index;
-                const searchSlice = fullStory.slice(startIdx);
-                const endMatch = searchSlice.match(endRegex);
-
-                if (!endMatch) {
-                    results.push(null);
-                    return;
-                }
-
-                const endIdxInSlice = endMatch.index + endMatch[0].length;
-                const text = fullStory.substring(startIdx, startIdx + endIdxInSlice).trim();
-                results.push(text);
-
-                // Update search position for next page to be the end of this one
-                currentSearchPos = startIdx + endIdxInSlice;
-            } catch (err) {
-                console.error(`Extraction error at page ${idx}:`, err);
-                results.push(null);
-            }
-        });
-
-        return results;
-    }, [project?.story, pages]);
+    const verbatimSegments = useMemo(
+        () => extractVerbatimSegments(project?.story, pages),
+        [project?.story, pages]
+    );
 
     if (!isOpen || !project) return null;
 
     const currentData = pages[currentPage];
     const hasNext = currentPage < pages.length - 1;
     const hasPrev = currentPage > 0;
-
-    const handleNext = () => hasNext && setCurrentPage(currentPage + 1);
-    const handlePrev = () => hasPrev && setCurrentPage(currentPage - 1);
+    const imageSrc = getDisplayImageSrc(currentData?.generatedAsset);
 
     return (
         <div className="modal-overlay previewer-overlay" onClick={onClose}>
-            <div className="previewer-card animate-in" onClick={e => e.stopPropagation()}>
+            <div className="previewer-card animate-in" onClick={(event) => event.stopPropagation()}>
                 <div className="previewer-header">
                     <div className="project-info">
                         <h3 className="heading-font">{project.name}</h3>
@@ -114,26 +29,14 @@ const ProjectPreviewer = ({ isOpen, onClose, project, appMode }) => {
                     </div>
                     {appMode === 'storybook' && (
                         <div className="text-toggle-group">
-                            <button
-                                className={`toggle-pill ${textMode === 'short' ? 'active' : ''}`}
-                                onClick={() => setTextMode('short')}
-                                title="Summarized version"
-                            >
-                                📝 Short
+                            <button className={`toggle-pill ${textMode === 'short' ? 'active' : ''}`} onClick={() => setTextMode('short')}>
+                                Short
                             </button>
-                            <button
-                                className={`toggle-pill ${textMode === 'full' ? 'active' : ''}`}
-                                onClick={() => setTextMode('full')}
-                                title="Original verbatim text"
-                            >
-                                📖 Full Story
+                            <button className={`toggle-pill ${textMode === 'full' ? 'active' : ''}`} onClick={() => setTextMode('full')}>
+                                Full Story
                             </button>
-                            <button
-                                className={`toggle-pill ${textMode === 'prompt' ? 'active' : ''}`}
-                                onClick={() => setTextMode('prompt')}
-                                title="AI Generation Instructions"
-                            >
-                                🎨 Prompt
+                            <button className={`toggle-pill ${textMode === 'prompt' ? 'active' : ''}`} onClick={() => setTextMode('prompt')}>
+                                Prompt
                             </button>
                         </div>
                     )}
@@ -145,18 +48,16 @@ const ProjectPreviewer = ({ isOpen, onClose, project, appMode }) => {
                         <div className="storybook-layout">
                             <div className="storybook-text-side">
                                 <div className="text-content">
-                                    {(() => {
-                                        if (textMode === 'prompt') return currentData?.pageContent || "No prompt description found.";
-                                        if (textMode === 'short') return currentData?.storySegment || "No summary found.";
-
-                                        // Full Text mode: Use pre-calculated verbatim segment
-                                        return verbatimSegments[currentPage] || currentData?.storySegment || "No story segment found.";
-                                    })()}
+                                    {textMode === 'prompt'
+                                        ? currentData?.pageContent || 'No prompt description found.'
+                                        : textMode === 'short'
+                                            ? currentData?.storySegment || 'No summary found.'
+                                            : verbatimSegments[currentPage] || currentData?.storySegment || 'No story segment found.'}
                                 </div>
                             </div>
                             <div className="storybook-image-side">
-                                {getImageSrc(currentData) ? (
-                                    <img src={getImageSrc(currentData)} alt={`Page ${currentPage + 1}`} className="preview-img" />
+                                {imageSrc ? (
+                                    <img src={imageSrc} alt={`Page ${currentPage + 1}`} className="preview-img" />
                                 ) : (
                                     <div className="preview-placeholder">
                                         <div className="loader small"></div>
@@ -167,12 +68,12 @@ const ProjectPreviewer = ({ isOpen, onClose, project, appMode }) => {
                         </div>
                     ) : (
                         <div className="manga-layout">
-                            {getImageSrc(currentData) ? (
-                                <img src={getImageSrc(currentData)} alt={`Page ${currentPage + 1}`} className="preview-img manga-page" />
+                            {imageSrc ? (
+                                <img src={imageSrc} alt={`Page ${currentPage + 1}`} className="preview-img manga-page" />
                             ) : (
                                 <div className="preview-placeholder">
                                     <div className="loader small"></div>
-                                    <p>Manga page not generated/assembled</p>
+                                    <p>Manga page not generated or assembled</p>
                                 </div>
                             )}
                         </div>
@@ -180,28 +81,16 @@ const ProjectPreviewer = ({ isOpen, onClose, project, appMode }) => {
                 </div>
 
                 <div className="previewer-footer">
-                    <button
-                        className="nav-arrow prev"
-                        onClick={handlePrev}
-                        disabled={!hasPrev}
-                    >
-                        ← Previous
+                    <button className="nav-arrow prev" onClick={() => hasPrev && setCurrentPage(currentPage - 1)} disabled={!hasPrev}>
+                        {'< Previous'}
                     </button>
                     <div className="progress-dots">
-                        {pages.map((_, i) => (
-                            <div
-                                key={i}
-                                className={`dot ${i === currentPage ? 'active' : ''}`}
-                                onClick={() => setCurrentPage(i)}
-                            />
+                        {pages.map((_, index) => (
+                            <div key={index} className={`dot ${index === currentPage ? 'active' : ''}`} onClick={() => setCurrentPage(index)} />
                         ))}
                     </div>
-                    <button
-                        className="nav-arrow next"
-                        onClick={handleNext}
-                        disabled={!hasNext}
-                    >
-                        Next →
+                    <button className="nav-arrow next" onClick={() => hasNext && setCurrentPage(currentPage + 1)} disabled={!hasNext}>
+                        {'Next >'}
                     </button>
                 </div>
             </div>

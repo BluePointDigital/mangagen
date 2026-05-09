@@ -1,41 +1,76 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useEffect, useState } from 'react';
+import StatusMessage from './ui/StatusMessage';
+import { createProject, isBackendUnavailableError, listProjects } from '../lib/api.mjs';
 
-const ProjectSelector = ({ onSelect }) => {
+const ProjectSelector = ({ onBackendReady, onBackendUnavailable, onExportProject, onImportProject, onNotify, onSelect }) => {
     const [projects, setProjects] = useState([]);
     const [newProjectName, setNewProjectName] = useState('');
     const [newProjectMode, setNewProjectMode] = useState('manga');
     const [loading, setLoading] = useState(true);
+    const [formMessage, setFormMessage] = useState('');
+    const [isImporting, setIsImporting] = useState(false);
 
     const fetchProjects = async () => {
         try {
-            const res = await fetch('/api/projects');
-            const data = await res.json();
+            const data = await listProjects();
             setProjects(data);
-        } catch (err) {
-            console.error('Failed to fetch projects:', err);
+            setFormMessage('');
+            onBackendReady?.();
+        } catch (error) {
+            console.error('Failed to fetch projects:', error);
+            setFormMessage(error.message);
+            if (isBackendUnavailableError(error)) {
+                onBackendUnavailable?.(error.message);
+            } else {
+                onNotify?.({ message: error.message, title: 'Projects Unavailable', type: 'error' });
+            }
         } finally {
             setLoading(false);
         }
     };
 
-    const handleCreateProject = async (e) => {
-        e.preventDefault();
-        if (!newProjectName.trim()) return;
+    const handleCreateProject = async (event) => {
+        event.preventDefault();
+        const trimmedName = newProjectName.trim();
+        if (!trimmedName) {
+            setFormMessage('Project name is required.');
+            return;
+        }
 
         try {
-            const res = await fetch('/api/projects', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: newProjectName.trim(), mode: newProjectMode })
-            });
-            const newProject = await res.json();
-            setProjects([...projects, newProject]);
+            const newProject = await createProject({ name: trimmedName, mode: newProjectMode });
+            setProjects((previous) => [newProject, ...previous.filter((project) => project.id !== newProject.id)]);
             setNewProjectName('');
             setNewProjectMode('manga');
+            setFormMessage('');
+            onBackendReady?.();
             onSelect(newProject);
-        } catch (err) {
-            console.error('Failed to create project:', err);
-            alert('Failed to create project');
+        } catch (error) {
+            console.error('Failed to create project:', error);
+            setFormMessage(error.message);
+            if (isBackendUnavailableError(error)) {
+                onBackendUnavailable?.(error.message);
+            } else {
+                onNotify?.({ message: error.message, title: 'Project Not Created', type: 'error' });
+            }
+        }
+    };
+
+    const handleImportProject = async (event) => {
+        const file = event.target.files?.[0];
+        if (!file || !onImportProject) return;
+        setIsImporting(true);
+        try {
+            const importedProject = await onImportProject(file);
+            if (importedProject) {
+                setProjects((previous) => [importedProject, ...previous.filter((project) => project.id !== importedProject.id)]);
+            }
+            setFormMessage('');
+        } catch (error) {
+            setFormMessage(error.message);
+        } finally {
+            setIsImporting(false);
+            event.target.value = '';
         }
     };
 
@@ -48,7 +83,13 @@ const ProjectSelector = ({ onSelect }) => {
     return (
         <div className="project-selector-overlay">
             <div className="project-selector-card">
-                <h2>Manga Maker Projects</h2>
+                <div className="project-selector-header">
+                    <h2>MangaGen Projects</h2>
+                    <label className="btn-secondary import-project-btn">
+                        {isImporting ? 'Importing...' : 'Import Project'}
+                        <input type="file" accept=".zip,.mangagen.zip,application/zip" onChange={handleImportProject} disabled={isImporting} />
+                    </label>
+                </div>
 
                 <div className="new-project-form">
                     <form onSubmit={handleCreateProject}>
@@ -56,7 +97,10 @@ const ProjectSelector = ({ onSelect }) => {
                             type="text"
                             placeholder="New Project Name..."
                             value={newProjectName}
-                            onChange={(e) => setNewProjectName(e.target.value)}
+                            onChange={(event) => {
+                                setNewProjectName(event.target.value);
+                                if (formMessage) setFormMessage('');
+                            }}
                         />
                         <div className="mode-selection">
                             <label>Project Type:</label>
@@ -66,7 +110,7 @@ const ProjectSelector = ({ onSelect }) => {
                                     className={`mode-option-btn ${newProjectMode === 'manga' ? 'selected' : ''}`}
                                     onClick={() => setNewProjectMode('manga')}
                                 >
-                                    <span className="mode-icon">📖</span>
+                                    <span className="mode-icon">Panels</span>
                                     <span className="mode-label">Manga</span>
                                     <span className="mode-desc">Panels, dialogue, SFX</span>
                                 </button>
@@ -75,12 +119,13 @@ const ProjectSelector = ({ onSelect }) => {
                                     className={`mode-option-btn ${newProjectMode === 'storybook' ? 'selected' : ''}`}
                                     onClick={() => setNewProjectMode('storybook')}
                                 >
-                                    <span className="mode-icon">🎨</span>
+                                    <span className="mode-icon">Pages</span>
                                     <span className="mode-label">Storybook</span>
-                                    <span className="mode-desc">Illustrations, art styles</span>
+                                    <span className="mode-desc">Illustrations, overlays, export</span>
                                 </button>
                             </div>
                         </div>
+                        <StatusMessage message={formMessage} tone="error" />
                         <button type="submit" className="btn-primary">Create New Project</button>
                     </form>
                 </div>
@@ -88,28 +133,30 @@ const ProjectSelector = ({ onSelect }) => {
                 <div className="project-list">
                     <h3>Recent Projects</h3>
                     {projects.length === 0 ? (
-                        <p className="empty-msg">No projects found. Create one to get started!</p>
+                        <p className="empty-msg">No projects found. Create one to get started.</p>
                     ) : (
                         <div className="projects-grid">
-                            {projects.map((p) => (
-                                <button
-                                    key={p.id}
-                                    className={`project-card ${p.mode === 'storybook' ? 'storybook-project' : 'manga-project'}`}
-                                    onClick={() => onSelect(p)}
+                            {projects.map((project) => (
+                                <div
+                                    key={project.id}
+                                    className={`project-card ${project.mode === 'storybook' ? 'storybook-project' : 'manga-project'}`}
                                 >
-                                    <div className="project-icon">{p.mode === 'storybook' ? '🎨' : '📖'}</div>
-                                    <div className="project-info">
-                                        <span className="project-name">{p.name}</span>
-                                        <span className="project-mode-tag">
-                                            {p.mode === 'storybook' ? 'Storybook' : 'Manga'}
-                                        </span>
-                                        {p.createdAt && (
-                                            <span className="project-date">
-                                                {new Date(p.createdAt).toLocaleDateString()}
+                                    <button type="button" className="project-card-open" onClick={() => onSelect(project)}>
+                                        <div className="project-icon">{project.mode === 'storybook' ? 'Book' : 'Manga'}</div>
+                                        <div className="project-info">
+                                            <span className="project-name">{project.name}</span>
+                                            <span className="project-mode-tag">
+                                                {project.mode === 'storybook' ? 'Storybook' : 'Manga'}
                                             </span>
-                                        )}
-                                    </div>
-                                </button>
+                                            {project.createdAt && (
+                                                <span className="project-date">{new Date(project.createdAt).toLocaleDateString()}</span>
+                                            )}
+                                        </div>
+                                    </button>
+                                    <button type="button" className="project-card-action" onClick={() => onExportProject?.(project)}>
+                                        Export
+                                    </button>
+                                </div>
                             ))}
                         </div>
                     )}
